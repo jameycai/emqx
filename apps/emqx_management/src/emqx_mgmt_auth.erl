@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -13,299 +13,198 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%--------------------------------------------------------------------
--module(emqx_mgmt_auth).
--include_lib("emqx/include/emqx.hrl").
--include_lib("emqx/include/logger.hrl").
 
-%% API
+-module(emqx_mgmt_auth).
+
+%% Mnesia Bootstrap
 -export([mnesia/1]).
 -boot_mnesia({mnesia, [boot]}).
+-copy_mnesia({mnesia, [copy]}).
 
--export([
-    create/4,
-    read/1,
-    update/4,
-    delete/1,
-    list/0,
-    init_bootstrap_file/0
-]).
+%% APP Management API
+-export([ add_default_app/0
+        , add_app/2
+        , add_app/5
+        , add_app/6
+        , force_add_app/6
+        , lookup_app/1
+        , get_appsecret/1
+        , update_app/2
+        , update_app/5
+        , del_app/1
+        , list_apps/0
+        ]).
 
--export([authorize/3]).
+%% APP Auth/ACL API
+-export([is_authorized/2]).
 
-%% Internal exports (RPC)
--export([
-    do_update/4,
-    do_delete/1,
-    do_create_app/3,
-    do_force_create_app/3
-]).
+-define(APP, emqx_management).
 
--ifdef(TEST).
--export([create/5]).
--endif.
+-record(mqtt_app, {id, secret, name, desc, status, expired}).
 
--define(APP, emqx_app).
+-type(appid() :: binary()).
 
--record(?APP, {
-    name = <<>> :: binary() | '_',
-    api_key = <<>> :: binary() | '_',
-    api_secret_hash = <<>> :: binary() | '_',
-    enable = true :: boolean() | '_',
-    desc = <<>> :: binary() | '_',
-    expired_at = 0 :: integer() | undefined | infinity | '_',
-    created_at = 0 :: integer() | '_'
-}).
+-type(appsecret() :: binary()).
+
+%%--------------------------------------------------------------------
+%% Mnesia Bootstrap
+%%--------------------------------------------------------------------
 
 mnesia(boot) ->
-    ok = mria:create_table(?APP, [
-        {type, set},
-        {rlog_shard, ?COMMON_SHARD},
-        {storage, disc_copies},
-        {record_name, ?APP},
-        {attributes, record_info(fields, ?APP)}
-    ]).
+    ok = ekka_mnesia:create_table(mqtt_app, [
+                {disc_copies, [node()]},
+                {record_name, mqtt_app},
+                {attributes, record_info(fields, mqtt_app)}]);
 
--spec init_bootstrap_file() -> ok | {error, _}.
-init_bootstrap_file() ->
-    File = bootstrap_file(),
-    ?SLOG(debug, #{msg => "init_bootstrap_api_keys_from_file", file => File}),
-    init_bootstrap_file(File).
+mnesia(copy) ->
+    ok = ekka_mnesia:copy_table(mqtt_app, disc_copies).
 
-create(Name, Enable, ExpiredAt, Desc) ->
-    ApiSecret = generate_api_secret(),
-    create(Name, ApiSecret, Enable, ExpiredAt, Desc).
-
-create(Name, ApiSecret, Enable, ExpiredAt, Desc) ->
-    case mnesia:table_info(?APP, size) < 100 of
-        true -> create_app(Name, ApiSecret, Enable, ExpiredAt, Desc);
-        false -> {error, "Maximum ApiKey"}
+%%--------------------------------------------------------------------
+%% Manage Apps
+%%--------------------------------------------------------------------
+-spec(add_default_app() -> ok | {ok, appsecret()} | {error, term()}).
+add_default_app() ->
+    AppId = application:get_env(?APP, default_application_id, undefined),
+    AppSecret = application:get_env(?APP, default_application_secret, undefined),
+    case {AppId, AppSecret} of
+        {undefined, _} -> ok;
+        {_, undefined} -> ok;
+        {_, _} ->
+            AppId1 = erlang:list_to_binary(AppId),
+            AppSecret1 = erlang:list_to_binary(AppSecret),
+            add_app(AppId1, <<"Default">>, AppSecret1, <<"Application user">>, true, undefined)
     end.
 
-read(Name) ->
-    case mnesia:dirty_read(?APP, Name) of
-        [App] -> {ok, to_map(App)};
-        [] -> {error, not_found}
+-spec(add_app(appid(), binary()) -> {ok, appsecret()} | {error, term()}).
+add_app(AppId, Name) when is_binary(AppId) ->
+    add_app(AppId, Name, <<"Application user">>, true, undefined).
+
+-spec(add_app(appid(), binary(), binary(), boolean(), integer() | undefined)
+      -> {ok, appsecret()}
+       | {error, term()}).
+add_app(AppId, Name, Desc, Status, Expired) when is_binary(AppId) ->
+    add_app(AppId, Name, undefined, Desc, Status, Expired).
+
+-spec(add_app(appid(), binary(), binary() | undefined, binary(), boolean(), integer() | undefined)
+      -> {ok, appsecret()}
+       | {error, term()}).
+add_app(AppId, Name, Secret, Desc, Status, Expired) when is_binary(AppId) ->
+    Secret1 = generate_appsecret_if_need(Secret),
+    App = #mqtt_app{id = AppId,
+                    secret = Secret1,
+                    name = Name,
+                    desc = Desc,
+                    status = Status,
+                    expired = Expired},
+    AddFun = fun() ->
+                 case mnesia:wread({mqtt_app, AppId}) of
+                     [] -> mnesia:write(App);
+                     _  -> mnesia:abort(alread_existed)
+                 end
+             end,
+    case mnesia:transaction(AddFun) of
+        {atomic, ok} -> {ok, Secret1};
+        {aborted, Reason} -> {error, Reason}
     end.
 
-update(Name, Enable, ExpiredAt, Desc) ->
-    trans(fun ?MODULE:do_update/4, [Name, Enable, ExpiredAt, Desc]).
-
-do_update(Name, Enable, ExpiredAt, Desc) ->
-    case mnesia:read(?APP, Name, write) of
-        [] ->
-            mnesia:abort(not_found);
-        [App0 = #?APP{enable = Enable0, desc = Desc0}] ->
-            App =
-                App0#?APP{
-                    expired_at = ExpiredAt,
-                    enable = ensure_not_undefined(Enable, Enable0),
-                    desc = ensure_not_undefined(Desc, Desc0)
-                },
-            ok = mnesia:write(App),
-            to_map(App)
+force_add_app(AppId, Name, Secret, Desc, Status, Expired) ->
+    AddFun = fun() ->
+                 mnesia:write(#mqtt_app{id = AppId,
+                                        secret = Secret,
+                                        name = Name,
+                                        desc = Desc,
+                                        status = Status,
+                                        expired = Expired})
+             end,
+    case mnesia:transaction(AddFun) of
+        {atomic, ok} -> ok;
+        {aborted, Reason} -> {error, Reason}
     end.
 
-delete(Name) ->
-    trans(fun ?MODULE:do_delete/1, [Name]).
-
-do_delete(Name) ->
-    case mnesia:read(?APP, Name) of
-        [] -> mnesia:abort(not_found);
-        [_App] -> mnesia:delete({?APP, Name})
+-spec(generate_appsecret_if_need(binary() | undefined) -> binary()).
+generate_appsecret_if_need(InSecrt) when is_binary(InSecrt), byte_size(InSecrt) > 0 ->
+    InSecrt;
+generate_appsecret_if_need(_) ->
+    AppConf = application:get_env(?APP, application, []),
+    case proplists:get_value(default_secret,  AppConf) of
+       undefined -> emqx_guid:to_base62(emqx_guid:gen());
+       Secret when is_binary(Secret) -> Secret
     end.
 
-list() ->
-    to_map(ets:match_object(?APP, #?APP{_ = '_'})).
+-spec(get_appsecret(appid()) -> {appsecret() | undefined}).
+get_appsecret(AppId) when is_binary(AppId) ->
+    case mnesia:dirty_read(mqtt_app, AppId) of
+        [#mqtt_app{secret = Secret}] -> Secret;
+        [] -> undefined
+    end.
 
-authorize(<<"/api/v5/users", _/binary>>, _ApiKey, _ApiSecret) ->
-    {error, <<"not_allowed">>};
-authorize(<<"/api/v5/api_key", _/binary>>, _ApiKey, _ApiSecret) ->
-    {error, <<"not_allowed">>};
-authorize(_Path, ApiKey, ApiSecret) ->
-    Now = erlang:system_time(second),
-    case find_by_api_key(ApiKey) of
-        {ok, true, ExpiredAt, SecretHash} when ExpiredAt >= Now ->
-            case emqx_dashboard_admin:verify_hash(ApiSecret, SecretHash) of
-                ok -> ok;
-                error -> {error, "secret_error"}
+-spec(lookup_app(appid()) -> undefined | {appid(), appsecret(), binary(), binary(), boolean(), integer() | undefined}).
+lookup_app(AppId) when is_binary(AppId) ->
+    case mnesia:dirty_read(mqtt_app, AppId) of
+        [#mqtt_app{id = AppId,
+                   secret = AppSecret,
+                   name = Name,
+                   desc = Desc,
+                   status = Status,
+                   expired = Expired}] -> {AppId, AppSecret, Name, Desc, Status, Expired};
+        [] -> undefined
+    end.
+
+-spec(update_app(appid(), boolean()) -> ok | {error, term()}).
+update_app(AppId, Status) ->
+    case mnesia:dirty_read(mqtt_app, AppId) of
+        [App = #mqtt_app{}] ->
+            case mnesia:transaction(fun() -> mnesia:write(App#mqtt_app{status = Status}) end) of
+                {atomic, ok} -> ok;
+                {aborted, Reason} -> {error, Reason}
             end;
-        {ok, true, _ExpiredAt, _SecretHash} ->
-            {error, "secret_expired"};
-        {ok, false, _ExpiredAt, _SecretHash} ->
-            {error, "secret_disable"};
-        {error, Reason} ->
-            {error, Reason}
+        [] ->
+            {error, not_found}
     end.
 
-find_by_api_key(ApiKey) ->
-    Fun = fun() -> mnesia:match_object(#?APP{api_key = ApiKey, _ = '_'}) end,
-    case mria:ro_transaction(?COMMON_SHARD, Fun) of
-        {atomic, [#?APP{api_secret_hash = SecretHash, enable = Enable, expired_at = ExpiredAt}]} ->
-            {ok, Enable, ExpiredAt, SecretHash};
+-spec(update_app(appid(), binary(), binary(), boolean(), integer() | undefined) -> ok | {error, term()}).
+update_app(AppId, Name, Desc, Status, Expired) ->
+    case mnesia:dirty_read(mqtt_app, AppId) of
+        [App = #mqtt_app{}] ->
+            case mnesia:transaction(fun() -> mnesia:write(App#mqtt_app{name = Name,
+                                                                       desc = Desc,
+                                                                       status = Status,
+                                                                       expired = Expired}) end) of
+                {atomic, ok} -> ok;
+                {aborted, Reason} -> {error, Reason}
+            end;
+        [] ->
+            {error, not_found}
+    end.
+
+-spec(del_app(appid()) -> ok | {error, term()}).
+del_app(AppId) when is_binary(AppId) ->
+    case mnesia:transaction(fun mnesia:delete/1, [{mqtt_app, AppId}]) of
+        {atomic, Ok} -> Ok;
+        {aborted, Reason} -> {error, Reason}
+    end.
+
+-spec(list_apps() -> [{appid(), appsecret(), binary(), binary(), boolean(), integer() | undefined}]).
+list_apps() ->
+    [ {AppId, AppSecret, Name, Desc, Status, Expired} || #mqtt_app{id = AppId,
+                                                                   secret = AppSecret,
+                                                                   name = Name,
+                                                                   desc = Desc,
+                                                                   status = Status,
+                                                                   expired = Expired} <- ets:tab2list(mqtt_app) ].
+%%--------------------------------------------------------------------
+%% Authenticate App
+%%--------------------------------------------------------------------
+
+-spec(is_authorized(appid(), appsecret()) -> boolean()).
+is_authorized(AppId, AppSecret) ->
+    case lookup_app(AppId) of
+        {_, AppSecret1, _, _, Status, Expired} ->
+            Status andalso is_expired(Expired) andalso AppSecret =:= AppSecret1;
         _ ->
-            {error, "not_found"}
+            false
     end.
 
-ensure_not_undefined(undefined, Old) -> Old;
-ensure_not_undefined(New, _Old) -> New.
+is_expired(undefined) -> true;
+is_expired(Expired)   -> Expired >= erlang:system_time(second).
 
-to_map(Apps) when is_list(Apps) ->
-    [to_map(App) || App <- Apps];
-to_map(#?APP{name = N, api_key = K, enable = E, expired_at = ET, created_at = CT, desc = D}) ->
-    #{
-        name => N,
-        api_key => K,
-        enable => E,
-        expired_at => ET,
-        created_at => CT,
-        desc => D,
-        expired => is_expired(ET)
-    }.
-
-is_expired(undefined) -> false;
-is_expired(ExpiredTime) -> ExpiredTime < erlang:system_time(second).
-
-create_app(Name, ApiSecret, Enable, ExpiredAt, Desc) ->
-    App =
-        #?APP{
-            name = Name,
-            enable = Enable,
-            expired_at = ExpiredAt,
-            desc = Desc,
-            created_at = erlang:system_time(second),
-            api_secret_hash = emqx_dashboard_admin:hash(ApiSecret),
-            api_key = list_to_binary(emqx_utils:gen_id(16))
-        },
-    case create_app(App) of
-        {ok, Res} ->
-            {ok, Res#{api_secret => ApiSecret}};
-        Error ->
-            Error
-    end.
-
-create_app(App = #?APP{api_key = ApiKey, name = Name}) ->
-    trans(fun ?MODULE:do_create_app/3, [App, ApiKey, Name]).
-
-force_create_app(NamePrefix, App = #?APP{api_key = ApiKey}) ->
-    trans(fun ?MODULE:do_force_create_app/3, [App, ApiKey, NamePrefix]).
-
-do_create_app(App, ApiKey, Name) ->
-    case mnesia:read(?APP, Name) of
-        [_] ->
-            mnesia:abort(name_already_existed);
-        [] ->
-            case mnesia:match_object(?APP, #?APP{api_key = ApiKey, _ = '_'}, read) of
-                [] ->
-                    ok = mnesia:write(App),
-                    to_map(App);
-                _ ->
-                    mnesia:abort(api_key_already_existed)
-            end
-    end.
-
-do_force_create_app(App, ApiKey, NamePrefix) ->
-    case mnesia:match_object(?APP, #?APP{api_key = ApiKey, _ = '_'}, read) of
-        [] ->
-            NewName = generate_unique_name(NamePrefix),
-            ok = mnesia:write(App#?APP{name = NewName});
-        [#?APP{name = Name}] ->
-            ok = mnesia:write(App#?APP{name = Name})
-    end.
-
-generate_unique_name(NamePrefix) ->
-    New = list_to_binary(NamePrefix ++ emqx_utils:gen_id(16)),
-    case mnesia:read(?APP, New) of
-        [] -> New;
-        _ -> generate_unique_name(NamePrefix)
-    end.
-
-trans(Fun, Args) ->
-    case mria:transaction(?COMMON_SHARD, Fun, Args) of
-        {atomic, Res} -> {ok, Res};
-        {aborted, Error} -> {error, Error}
-    end.
-
-generate_api_secret() ->
-    Random = crypto:strong_rand_bytes(32),
-    emqx_base62:encode(Random).
-
-bootstrap_file() ->
-    case emqx:get_config([api_key, bootstrap_file], <<>>) of
-        %% For compatible remove until 5.1.0
-        <<>> ->
-            emqx:get_config([dashboard, bootstrap_users_file], <<>>);
-        File ->
-            File
-    end.
-
-init_bootstrap_file(<<>>) ->
-    ok;
-init_bootstrap_file(File) ->
-    case file:open(File, [read, binary]) of
-        {ok, Dev} ->
-            {ok, MP} = re:compile(<<"(\.+):(\.+$)">>, [ungreedy]),
-            init_bootstrap_file(File, Dev, MP);
-        {error, Reason0} ->
-            Reason = emqx_utils:explain_posix(Reason0),
-            ?SLOG(
-                error,
-                #{
-                    msg => "failed_to_open_the_bootstrap_file",
-                    file => File,
-                    reason => Reason
-                }
-            ),
-            {error, Reason}
-    end.
-
-init_bootstrap_file(File, Dev, MP) ->
-    try
-        add_bootstrap_file(File, Dev, MP, 1)
-    catch
-        throw:Error -> {error, Error};
-        Type:Reason:Stacktrace -> {error, {Type, Reason, Stacktrace}}
-    after
-        file:close(Dev)
-    end.
-
--define(BOOTSTRAP_TAG, <<"Bootstrapped From File">>).
-
-add_bootstrap_file(File, Dev, MP, Line) ->
-    case file:read_line(Dev) of
-        {ok, Bin} ->
-            case re:run(Bin, MP, [global, {capture, all_but_first, binary}]) of
-                {match, [[AppKey, ApiSecret]]} ->
-                    App =
-                        #?APP{
-                            enable = true,
-                            expired_at = infinity,
-                            desc = ?BOOTSTRAP_TAG,
-                            created_at = erlang:system_time(second),
-                            api_secret_hash = emqx_dashboard_admin:hash(ApiSecret),
-                            api_key = AppKey
-                        },
-                    case force_create_app("from_bootstrap_file_", App) of
-                        {ok, ok} ->
-                            add_bootstrap_file(File, Dev, MP, Line + 1);
-                        {error, Reason} ->
-                            throw(#{file => File, line => Line, content => Bin, reason => Reason})
-                    end;
-                _ ->
-                    Reason = "invalid_format",
-                    ?SLOG(
-                        error,
-                        #{
-                            msg => "failed_to_load_bootstrap_file",
-                            file => File,
-                            line => Line,
-                            content => Bin,
-                            reason => Reason
-                        }
-                    ),
-                    throw(#{file => File, line => Line, content => Bin, reason => Reason})
-            end;
-        eof ->
-            ok;
-        {error, Reason} ->
-            throw(#{file => File, line => Line, reason => Reason})
-    end.

@@ -2,47 +2,11 @@
 # -*- tab-width:4;indent-tabs-mode:nil -*-
 # ex: ts=4 sw=4 et
 
-set -euo pipefail
+set -e
 
-DEBUG="${DEBUG:-0}"
-if [ "$DEBUG" -eq 1 ]; then
-  set -x
-fi
-if [ "$DEBUG" -eq 2 ]; then
-  set -x
-  export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
-fi
-
-# We need to find real directory with emqx files on all platforms
-# even when bin/emqx is symlinked on several levels
-# - readlink -f works perfectly, but `-f` flag has completely different meaning in BSD version,
-#   so we can't use it universally.
-# - `stat -f%R` on MacOS does exactly what `readlink -f` does on Linux, but we can't use it
-#   as a universal solution either because GNU stat has different syntax and this argument is invalid.
-#   Also, version of stat which supports this syntax is only available since MacOS 12
-if [ "$(uname -s)" == 'Darwin' ]; then
-    product_version="$(sw_vers -productVersion | cut -d '.' -f 1)"
-    if [ "$product_version" -ge 12 ]; then
-        # if homebrew coreutils package is installed, GNU version of stat can take precedence,
-        # so we use absolute path to ensure we are calling MacOS default
-        RUNNER_ROOT_DIR="$(cd "$(dirname "$(/usr/bin/stat -f%R "$0" || echo "$0")")"/..; pwd -P)"
-    else
-        # try our best to resolve link on MacOS <= 11
-        RUNNER_ROOT_DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")"/..; pwd -P)"
-    fi
-else
-    RUNNER_ROOT_DIR="$(cd "$(dirname "$(realpath "$0" || echo "$0")")"/..; pwd -P)"
-fi
-
-# shellcheck disable=SC1090,SC1091
-. "$RUNNER_ROOT_DIR"/releases/emqx_vars
-
-# defined in emqx_vars
-export RUNNER_ROOT_DIR
-export EMQX_ETC_DIR
-export REL_VSN
-export SCHEMA_MOD
-export IS_ENTERPRISE
+ROOT_DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")"/..; pwd -P)"
+# shellcheck disable=SC1090
+. "$ROOT_DIR"/releases/emqx_vars
 
 RUNNER_SCRIPT="$RUNNER_BIN_DIR/$REL_NAME"
 CODE_LOADING_MODE="${CODE_LOADING_MODE:-embedded}"
@@ -50,232 +14,105 @@ REL_DIR="$RUNNER_ROOT_DIR/releases/$REL_VSN"
 
 WHOAMI=$(whoami)
 
-# hocon try to read environment variables starting with "EMQX_"
-export HOCON_ENV_OVERRIDE_PREFIX='EMQX_'
+# Make sure log directory exists
+mkdir -p "$RUNNER_LOG_DIR"
 
-export ERTS_DIR="$RUNNER_ROOT_DIR/erts-$ERTS_VSN"
+# Make sure data directory exists
+mkdir -p "$RUNNER_DATA_DIR"
+
+export ROOTDIR="$RUNNER_ROOT_DIR"
+export ERTS_DIR="$ROOTDIR/erts-$ERTS_VSN"
 export BINDIR="$ERTS_DIR/bin"
 export EMU="beam"
 export PROGNAME="erl"
-export ERTS_LIB_DIR="$RUNNER_ROOT_DIR/lib"
 DYNLIBS_DIR="$RUNNER_ROOT_DIR/dynlibs"
+ERTS_LIB_DIR="$ERTS_DIR/../lib"
 
-logerr() {
-    if [ "${TERM:-dumb}" = dumb ]; then
-        echo -e "ERROR: $*" 1>&2
-    else
-        echo -e "$(tput setaf 1)ERROR: $*$(tput sgr0)" 1>&2
-    fi
+# Echo to stderr on errors
+echoerr() { echo "$*" 1>&2; }
+
+check_eralng_start() {
+    "$BINDIR/$PROGNAME" -noshell -boot "$REL_DIR/start_clean" -s crypto start -s init stop
 }
 
-logwarn() {
-    if [ "${TERM:-dumb}" = dumb ]; then
-        echo "WARNING: $*"
-    else
-        echo "$(tput setaf 3)WARNING: $*$(tput sgr0)"
-    fi
-}
-
-logdebug() {
-    if [ "$DEBUG" -eq 1 ]; then
-        echo "DEBUG: $*"
-    fi
-}
-
-die() {
-    set +x
-    logerr "$1"
-    errno=${2:-1}
-    exit "$errno"
-}
-
-assert_node_alive() {
-    if ! relx_nodetool "ping" > /dev/null; then
+if ! check_eralng_start >/dev/null 2>&1; then
+    BUILT_ON="$(head -1 "${REL_DIR}/BUILT_ON")"
+    ## failed to start, might be due to missing libs, try to be portable
+    export LD_LIBRARY_PATH="$DYNLIBS_DIR:$LD_LIBRARY_PATH"
+    if ! check_eralng_start; then
+        ## it's hopeless
+        echoerr "FATAL: Unable to start Erlang."
+        echoerr "Please make sure openssl-1.1.1 (libcrypto) and libncurses are installed."
+        echoerr "Also ensure it's running on the correct platform,"
+        echoerr "this EMQX release is built for $BUILT_ON"
         exit 1
     fi
-}
-
-usage() {
-    local command="$1"
-
-    case "$command" in
-    start)
-        echo "Start EMQX service in daemon mode"
-        ;;
-    stop)
-        echo "Stop the running EMQX program"
-        ;;
-    console)
-        echo "Boot up EMQX service in an interactive Erlang or Elixir shell"
-        echo "This command needs a tty"
-        ;;
-    console_clean)
-        echo "This command does NOT boot up the EMQX service"
-        echo "It only starts an interactive Erlang or Elixir console with all the"
-        echo "EMQX code available"
-        ;;
-    foreground)
-        echo "Start EMQX in foreground mode without an interactive shell"
-        ;;
-    pid)
-        echo "Print out EMQX process identifier"
-        ;;
-    ping)
-        echo "Check if the EMQX node is up and running"
-        echo "This command exit with 0 silently if node is running"
-        ;;
-    escript)
-        echo "Execute a escript using the Erlang runtime from EMQX package installation"
-        echo "For example $REL_NAME escript /path/to/my/escript my_arg1 my_arg2"
-        ;;
-    attach)
-        echo "This command is applicable when EMQX is started in daemon mode."
-        echo "It attaches the current shell to EMQX's control console"
-        echo "through a named pipe."
-        logwarn "try to use the safer alternative, remote_console command."
-        ;;
-    remote_console)
-        echo "Start an interactive shell running an Erlang or Elixir node which "
-        echo "hidden-connects to the running EMQX node".
-        echo "This command is mostly used for troubleshooting."
-        ;;
-    ertspath)
-        echo "Print path to Erlang runtime bin dir"
-        ;;
-    rpc)
-        echo "Usage: $REL_NAME rpc MODULE FUNCTION [ARGS, ...]"
-        echo "Connect to the EMQX node and make an Erlang RPC"
-        echo "This command blocks for at most 60 seconds."
-        echo "It exits with non-zero code in case of any RPC failure"
-        echo "including connection error and runtime exception"
-        ;;
-    rpcterms)
-        echo "Usage: $REL_NAME rpcterms MODULE FUNCTION [ARGS, ...]"
-        echo "Connect to the EMQX node and make an Erlang RPC"
-        echo "The result of the RPC call is pretty-printed as an "
-        echo "Erlang term"
-        ;;
-    root_dir)
-        echo "Print EMQX installation root dir"
-        ;;
-    eval)
-        echo "Evaluate an Erlang expression in the EMQX node."
-        ;;
-    eval-ex)
-        echo "Evaluate an Elixir expression in the EMQX node. Only applies to Elixir node"
-        ;;
-    versions)
-        echo "List installed EMQX release versions and their status"
-        ;;
-    unpack)
-        echo "Usage: $REL_NAME unpack [VERSION]"
-        echo "Unpacks a release package VERSION, it assumes that this"
-        echo "release package tarball has already been deployed at one"
-        echo "of the following locations:"
-        echo "      releases/<relname>-<version>.tar.gz"
-        ;;
-    install)
-        echo "Usage: $REL_NAME install [VERSION]"
-        echo "Installs a release package VERSION, it assumes that this"
-        echo "release package tarball has already been deployed at one"
-        echo "of the following locations:"
-        echo "      releases/<relname>-<version>.tar.gz"
-        echo ""
-        echo "     --no-permanent   Install release package VERSION but"
-        echo "                      don't make it permanent"
-        ;;
-    uninstall)
-        echo "Usage: $REL_NAME uninstall [VERSION]"
-        echo "Uninstalls a release VERSION, it will only accept"
-        echo "versions that are not currently in use"
-        ;;
-    upgrade)
-        echo "Usage: $REL_NAME upgrade [VERSION]"
-        echo "Upgrades the currently running release to VERSION, it assumes"
-        echo "that a release package tarball has already been deployed at one"
-        echo "of the following locations:"
-        echo "      releases/<relname>-<version>.tar.gz"
-        echo ""
-        echo "     --no-permanent   Install release package VERSION but"
-        echo "                      don't make it permanent"
-        ;;
-    downgrade)
-        echo "Usage: $REL_NAME downgrade [VERSION]"
-        echo "Downgrades the currently running release to VERSION, it assumes"
-        echo "that a release package tarball has already been deployed at one"
-        echo "of the following locations:"
-        echo "      releases/<relname>-<version>.tar.gz"
-        echo ""
-        echo "     --no-permanent   Install release package VERSION but"
-        echo "                      don't make it permanent"
-        ;;
-    check_config)
-        echo "Checks the EMQX config without generating any files"
-        ;;
-    *)
-        echo "Usage: $REL_NAME COMMAND [help]"
-        echo ''
-        echo "Commonly used COMMANDs:"
-        echo "  start:      Start EMQX in daemon mode"
-        echo "  console:    Start EMQX in an interactive Erlang or Elixir shell"
-        echo "  foreground: Start EMQX in foreground mode without an interactive shell"
-        echo "  stop:       Stop the running EMQX node"
-        echo "  ctl:        Administration commands, execute '$REL_NAME ctl help' for more details"
-        echo ''
-        echo "More:"
-        echo "  Shell attach:     remote_console | attach"
-#       echo "  Up/Down-grade:    upgrade | downgrade | install | uninstall | versions" # TODO enable when supported
-        echo "  Install Info:     ertspath | root_dir"
-        echo "  Runtime Status:   pid | ping"
-        echo "  Validate Config:  check_config"
-        echo "  Advanced:         console_clean | escript | rpc | rpcterms | eval | eval-ex"
-        echo ''
-        echo "Execute '$REL_NAME COMMAND help' for more information"
-    ;;
-    esac
-}
-
-COMMAND="${1:-}"
-GREP='grep --color=never'
-
-if [ -z "$COMMAND" ]; then
-    usage 'help'
-    exit 1
-elif [ "$COMMAND" = 'help' ]; then
-    usage 'help'
-    exit 0
+    echoerr "WARNING: There seem to be missing dynamic libs from the OS. Using libs from ${DYNLIBS_DIR}"
 fi
-
-if [ "${2:-}" = 'help' ]; then
-    ## 'ctl' command has its own usage info
-    if [ "$COMMAND" != 'ctl' ]; then
-        usage "$COMMAND"
-        exit 0
-    fi
-fi
-
-## IS_BOOT_COMMAND is set for later to inspect node name and cookie from hocon config (or env variable)
-case "${COMMAND}" in
-    start|console|console_clean|foreground|check_config)
-        IS_BOOT_COMMAND='yes'
-        ;;
-    ertspath)
-        echo "$ERTS_DIR"
-        exit 0
-        ;;
-    root_dir)
-        echo "$RUNNER_ROOT_DIR"
-        exit 0
-        ;;
-    *)
-        IS_BOOT_COMMAND='no'
-        ;;
-esac
 
 ## backward compatible
 if [ -d "$ERTS_DIR/lib" ]; then
     export LD_LIBRARY_PATH="$ERTS_DIR/lib:$LD_LIBRARY_PATH"
 fi
+
+# cuttlefish try to read environment variables starting with "EMQX_"
+export CUTTLEFISH_ENV_OVERRIDE_PREFIX='EMQX_'
+
+relx_usage() {
+    command="$1"
+
+    case "$command" in
+        unpack)
+            echo "Usage: $REL_NAME unpack [VERSION]"
+            echo "Unpacks a release package VERSION, it assumes that this"
+            echo "release package tarball has already been deployed at one"
+            echo "of the following locations:"
+            echo "      releases/<relname>-<version>.tar.gz"
+            echo "      releases/<relname>-<version>.zip"
+            ;;
+        install)
+            echo "Usage: $REL_NAME install [VERSION]"
+            echo "Installs a release package VERSION, it assumes that this"
+            echo "release package tarball has already been deployed at one"
+            echo "of the following locations:"
+            echo "      releases/<relname>-<version>.tar.gz"
+            echo "      releases/<relname>-<version>.zip"
+            echo ""
+            echo "     --no-permanent   Install release package VERSION but"
+            echo "                      don't make it permanent"
+            ;;
+        uninstall)
+            echo "Usage: $REL_NAME uninstall [VERSION]"
+            echo "Uninstalls a release VERSION, it will only accept"
+            echo "versions that are not currently in use"
+            ;;
+        upgrade)
+            echo "Usage: $REL_NAME upgrade [VERSION]"
+            echo "Upgrades the currently running release to VERSION, it assumes"
+            echo "that a release package tarball has already been deployed at one"
+            echo "of the following locations:"
+            echo "      releases/<relname>-<version>.tar.gz"
+            echo "      releases/<relname>-<version>.zip"
+            echo ""
+            echo "     --no-permanent   Install release package VERSION but"
+            echo "                      don't make it permanent"
+            ;;
+        downgrade)
+            echo "Usage: $REL_NAME downgrade [VERSION]"
+            echo "Downgrades the currently running release to VERSION, it assumes"
+            echo "that a release package tarball has already been deployed at one"
+            echo "of the following locations:"
+            echo "      releases/<relname>-<version>.tar.gz"
+            echo "      releases/<relname>-<version>.zip"
+            echo ""
+            echo "     --no-permanent   Install release package VERSION but"
+            echo "                      don't make it permanent"
+            ;;
+        *)
+            echo "Usage: $REL_NAME {start|start_boot <file>|ertspath|foreground|stop|restart|reboot|pid|ping|console|console_clean|console_boot <file>|attach|remote_console|upgrade|downgrade|install|uninstall|versions|escript|rpc|rpcterms|eval|root_dir}"
+            ;;
+    esac
+}
 
 # Simple way to check the correct user and fail early
 check_user() {
@@ -286,15 +123,16 @@ check_user() {
             echo "You need to be root or use sudo to run this command"
             exit 1
         fi
-        CMD="DEBUG=$DEBUG \"$RUNNER_SCRIPT\" "
+        CMD="\"$RUNNER_SCRIPT\" "
         for ARG in "$@"; do
             CMD="${CMD} \"$ARG\""
         done
-        # This will drop privileges into the runner user
+        # This will drop priviledges into the runner user
         # It exec's in a new shell and the current shell will exit
         exec su - "$RUNNER_USER" -c "$CMD"
     fi
 }
+
 
 # Make sure the user running this script is the owner and/or su to that user
 check_user "$@"
@@ -303,74 +141,22 @@ if [ "$ES" -ne 0 ]; then
     exit $ES
 fi
 
-# Make sure log directory exists
-mkdir -p "$EMQX_LOG_DIR"
+if [ -z "$WITH_EPMD" ]; then
+    EPMD_ARG="-start_epmd false -epmd_module ekka_epmd -proto_dist ekka"
+else
+    EPMD_ARG="-start_epmd true $PROTO_DIST_ARG"
+fi
 
-# turn off debug as this is static
-set +x
-COMPATIBILITY_CHECK='
-    io:format("BEAM_OK~n", []),
-    try
-        [_|_] = L = crypto:info_lib(),
-        io:format("CRYPTO_OK ~0p~n", [L])
-    catch
-        _ : _ ->
-            %% so logger has the chance to log something
-            timer:sleep(100),
-            halt(1)
+# Warn the user if ulimit -n is less than 1024
+ULIMIT_F=$(ulimit -n)
+if [ "$ULIMIT_F" -lt 1024 ]; then
+    echo "!!!!"
+    echo "!!!! WARNING: ulimit -n is ${ULIMIT_F}; 1024 is the recommended minimum."
+    echo "!!!!"
+fi
 
-    end,
-    try
-        mnesia_hook:module_info(),
-        io:format("MNESIA_OK~n", [])
-    catch
-        _ : _ ->
-            io:format("WARNING: Mnesia app has no post-coommit hook support~n", []),
-            halt(2)
-    end,
-    halt(0).
-'
-[ "$DEBUG" -eq 1 ] && set -x
-
-compatiblity_info() {
-  # RELEASE_LIB is used by Elixir
-  # set crash-dump bytes to zero to ensure no crash dump is generated when erl crashes
-  env ERL_CRASH_DUMP_BYTES=0 "$BINDIR/$PROGNAME" \
-    -noshell \
-    -boot "$REL_DIR/start_clean" \
-    -boot_var RELEASE_LIB "$ERTS_LIB_DIR/lib" \
-    -eval "$COMPATIBILITY_CHECK"
-}
-
-# Collect Erlang/OTP runtime sanity and compatibility in one go
-maybe_use_portable_dynlibs() {
-    # Read BUILD_INFO early as the next commands may mess up the shell
-    BUILD_INFO="$(cat "${REL_DIR}/BUILD_INFO")"
-    COMPATIBILITY_INFO="$(compatiblity_info 2>/dev/null || true)"
-    if ! (echo -e "$COMPATIBILITY_INFO" | $GREP -q 'CRYPTO_OK'); then
-        ## failed to start, might be due to missing libs, try to be portable
-        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$DYNLIBS_DIR}"
-        if [ "$LD_LIBRARY_PATH" != "$DYNLIBS_DIR" ]; then
-            export LD_LIBRARY_PATH="$DYNLIBS_DIR:$LD_LIBRARY_PATH"
-        fi
-        ## Turn off debug, because COMPATIBILITY_INFO needs to capture stderr
-        COMPATIBILITY_INFO="$(compatiblity_info 2>&1 || true)"
-        if ! (echo -e "$COMPATIBILITY_INFO" | $GREP -q 'BEAM_OK'); then
-            ## not able to start beam.smp
-            logerr "$COMPATIBILITY_INFO"
-            logerr "Please ensure it is running on the correct platform:"
-            logerr "$BUILD_INFO"
-            logerr "Version=$REL_VSN"
-            logerr "Required dependencies: openssl-1.1.1 (libcrypto), libncurses and libatomic1"
-            exit 1
-        elif ! (echo -e "$COMPATIBILITY_INFO" | $GREP -q 'CRYPTO_OK'); then
-            ## not able to start crypto app
-            logerr "$COMPATIBILITY_INFO"
-            exit 2
-        fi
-        logwarn "Using libs from '${DYNLIBS_DIR}' due to missing from the OS."
-    fi
-}
+# By default, use cuttlefish to generate app.config and vm.args
+CUTTLEFISH="${USE_CUTTLEFISH:-yes}"
 
 SED_REPLACE="sed -i "
 case $(sed --help 2>&1) in
@@ -392,350 +178,48 @@ relx_get_pid() {
     fi
 }
 
+relx_get_nodename() {
+    id="longname$(relx_gen_id)-${NAME}"
+    "$BINDIR/erl" -boot "$REL_DIR/start_clean" -eval '[Host] = tl(string:tokens(atom_to_list(node()),"@")), io:format("~s~n", [Host]), halt()' -noshell "${NAME_TYPE}" "$id"
+}
+
 # Connect to a remote node
-remsh() {
+relx_rem_sh() {
     # Generate a unique id used to allow multiple remsh to the same node
     # transparently
-    id="remsh$(gen_node_id)-${NAME}"
+    id="remsh$(relx_gen_id)-${NAME}"
+    # Get the node's ticktime so that we use the same thing.
+    TICKTIME="$(relx_nodetool rpcterms net_kernel get_net_ticktime)"
 
-    # shellcheck disable=SC2086
+    # shellcheck disable=SC2086 # $EPMD_ARG is supposed to be split by whitespace
     # Setup remote shell command to control node
-    if [ "$IS_ELIXIR" = no ] || [ "${EMQX_CONSOLE_FLAVOR:-}" = 'erl' ] ; then
-        set -- "$BINDIR/erl" "$NAME_TYPE" "$id" \
-            -remsh "$NAME" -boot "$REL_DIR/start_clean" \
-            -boot_var ERTS_LIB_DIR "$ERTS_LIB_DIR" \
-            -boot_var RELEASE_LIB "$ERTS_LIB_DIR" \
-            -setcookie "$COOKIE" \
-            -hidden \
-            -kernel net_ticktime "$TICKTIME" \
-            $EPMD_ARGS
-    else
-        set -- "$REL_DIR/iex" \
-            --remsh "$NAME" \
-            --boot-var RELEASE_LIB "$ERTS_LIB_DIR" \
-            --cookie "$COOKIE" \
-            --hidden \
-            --erl "-kernel net_ticktime $TICKTIME" \
-            --erl "$EPMD_ARGS" \
-            --erl "$NAME_TYPE $id" \
-            --boot "$REL_DIR/start_clean"
-    fi
-    exec "$@"
+    exec "$BINDIR/erl" "$NAME_TYPE" "$id" -remsh "$NAME" -boot "$REL_DIR/start_clean" \
+         -boot_var ERTS_LIB_DIR "$ERTS_LIB_DIR" \
+         -setcookie "$COOKIE" -hidden -kernel net_ticktime "$TICKTIME" $EPMD_ARG
 }
 
 # Generate a random id
-gen_node_id() {
-    od -t u -N 4 /dev/urandom | head -n1 | awk '{print $2 % 1000}'
-}
-
-call_nodetool() {
-    "$ERTS_DIR/bin/escript" "$RUNNER_ROOT_DIR/bin/nodetool" "$@"
+relx_gen_id() {
+    od -t x -N 4 /dev/urandom | head -n1 | awk '{print $2}'
 }
 
 # Control a node
 relx_nodetool() {
     command="$1"; shift
-    ERL_FLAGS="${ERL_FLAGS:-} $EPMD_ARGS -setcookie $COOKIE" \
-             call_nodetool "$NAME_TYPE" "$NAME" "$command" "$@"
-}
+    export RUNNER_ROOT_DIR
+    export REL_VSN
 
-call_hocon() {
-    call_nodetool hocon "$@" \
-        || die "call_hocon_failed: $*" $?
-}
-
-find_emqx_process() {
-    ## Find the running node from 'ps -ef'
-    ##  * The grep args like '[e]mqx' but not 'emqx' is to avoid greping the grep command itself
-    ##  * The running 'remsh' and 'nodetool' processes must be excluded
-    if [ -n "${EMQX_NODE__NAME:-}" ]; then
-        # if node name is provided, filter by node name
-        # shellcheck disable=SC2009
-        ps -ef | $GREP '[e]mqx' | $GREP -v -E '(remsh|nodetool)' | $GREP -E "\s-s?name\s${EMQX_NODE__NAME}" | $GREP -oE "\-[r]oot ${RUNNER_ROOT_DIR}.*" || true
-    else
-        # shellcheck disable=SC2009
-        ps -ef | $GREP '[e]mqx' | $GREP -v -E '(remsh|nodetool)' | $GREP -oE "\-[r]oot ${RUNNER_ROOT_DIR}.*" || true
-    fi
-}
-
-## Resolve boot configs in a batch
-## This is because starting the Erlang beam with all modules loaded
-## and parsing HOCON config + environment variables is a non-trivial task
-CONF_KEYS=( 'node.data_dir' 'node.name' 'node.cookie' 'node.db_backend' 'cluster.proto_dist' 'node.dist_net_ticktime' )
-if [ "$IS_ENTERPRISE" = 'yes' ]; then
-    CONF_KEYS+=( 'license.key' )
-fi
-
-## To be backward compatible, read and then unset EMQX_NODE_NAME
-if [ -n "${EMQX_NODE_NAME:-}" ]; then
-    export EMQX_NODE__NAME="${EMQX_NODE_NAME}"
-    unset EMQX_NODE_NAME
-fi
-
-# Turn off debug as the ps output can be quite noisy
-set +x
-
-PS_LINE="$(find_emqx_process)"
-logdebug "PS_LINE=$PS_LINE"
-RUNNING_NODES_COUNT="$(echo -e "$PS_LINE" | sed '/^\s*$/d' | wc -l)"
-[ "$RUNNING_NODES_COUNT" -gt 1 ] && logdebug "More than one running node found: count=$RUNNING_NODES_COUNT"
-
-if [ "$IS_BOOT_COMMAND" = 'yes' ]; then
-    if [ "$RUNNING_NODES_COUNT" -gt 0 ] && [ "$COMMAND" != 'check_config' ]; then
-        running_node_name=$(echo -e "$PS_LINE" | $GREP -oE "\s-s?name.*" | awk '{print $2}' || true)
-        if [ -n "$running_node_name" ] && [ "$running_node_name" = "${EMQX_NODE__NAME:-}" ]; then
-            echo "Node ${running_node_name} is already running!"
-            exit 1
-        fi
-    fi
-    [ -f "$EMQX_ETC_DIR"/emqx.conf ] || die "emqx.conf is not found in $EMQX_ETC_DIR" 1
-    maybe_use_portable_dynlibs
-    if [ "${EMQX_BOOT_CONFIGS:-}" = '' ]; then
-        EMQX_BOOT_CONFIGS="$(call_hocon -s "$SCHEMA_MOD" -c "$EMQX_ETC_DIR"/emqx.conf multi_get "${CONF_KEYS[@]}")"
-        ## export here so the 'console' command recursively called from
-        ## 'start' command does not have to parse the configs again
-        export EMQX_BOOT_CONFIGS
-    fi
-else
-    # For non-boot commands, we need below runtime facts to connect to the running node:
-    #  1. The running node name;
-    #  2. The Erlang cookie in use by the running node name;
-    #  3. SSL options if the node is using TLS for Erlang distribution;
-    #  4. Erlang kernel application's net_ticktime config.
-    #
-    # There are 3 sources of truth to get those runtime information.
-    # Listed in the order of preference:
-    #  1. The boot command (which can be inspected from 'ps -ef' command output)
-    #  2. The generated vm.<time>.config file located in the dir pointed by 'node.data_dir'
-    #  3. The bootstrap config 'etc/emqx.conf'
-    #
-    # If failed to read from source 1, the information is retrieved from source 3
-    # i.e. source 2 is never used.
-    #
-    # NOTES:
-    #  * We should avoid getting runtime information with the 3rd approach because 'etc/emqx.conf' might
-    #    be updated after the node is started. e.g. If a user starts the node with name 'emqx@127.0.0.1'
-    #    then update the config in the file to 'node.name = "emqx@local.net"', after this change,
-    #    there would be no way stop the running node 'emqx@127.0.0.1', because 'emqx stop' command
-    #    would try to stop the new node instead.
-    if [ "$RUNNING_NODES_COUNT" -eq 1 ]; then
-        ## only one emqx node is running, get running args from 'ps -ef' output
-        tmp_nodename=$(echo -e "$PS_LINE" | $GREP -oE "\s-s?name.*" | awk '{print $2}' || true)
-        tmp_cookie=$(echo -e "$PS_LINE" | $GREP -oE "\s-setcookie.*" | awk '{print $2}' || true)
-        SSL_DIST_OPTFILE="$(echo -e "$PS_LINE" | $GREP -oE '\-ssl_dist_optfile\s.+\s' | awk '{print $2}' || true)"
-        tmp_ticktime="$(echo -e "$PS_LINE" | $GREP -oE '\s-kernel\snet_ticktime\s.+\s' | awk '{print $3}' || true)"
-        # data_dir is actually not needed, but kept anyway
-        tmp_datadir="$(echo -e "$PS_LINE" | $GREP -oE "\-emqx_data_dir.*" | sed -E 's#.+emqx_data_dir[[:blank:]]##g' | sed -E 's#[[:blank:]]--$##g' || true)"
-        if [ -z "$SSL_DIST_OPTFILE" ]; then
-            tmp_proto='inet_tcp'
-        else
-            tmp_proto='inet_tls'
-        fi
-        ## Make the format like what call_hocon multi_get prints out, but only need 4 args
-        EMQX_BOOT_CONFIGS="node.name=${tmp_nodename}\nnode.cookie=${tmp_cookie}\ncluster.proto_dist=${tmp_proto}\nnode.dist_net_ticktime=$tmp_ticktime\nnode.data_dir=${tmp_datadir}"
-    else
-        if [ "$RUNNING_NODES_COUNT" -gt 1 ]; then
-            if [ -z "${EMQX_NODE__NAME:-}" ]; then
-                tmp_nodenames=$(echo -e "$PS_LINE" | $GREP -oE "\s-s?name.*" | awk '{print $2}' | tr '\n' ' ')
-                logerr "More than one EMQX node found running (root dir: ${RUNNER_ROOT_DIR})"
-                logerr "Running nodes: $tmp_nodenames"
-                logerr "Make sure environment variable EMQX_NODE__NAME is set to indicate for which node this command is intended."
-                exit 1
-            fi
-        else
-            if [ -n "${EMQX_NODE__NAME:-}" ]; then
-                die "Node $EMQX_NODE__NAME is not running?"
-            fi
-        fi
-        ## We have no choice but to read the bootstrap config (with environment overrides available in the current shell)
-        [ -f "$EMQX_ETC_DIR"/emqx.conf ] || die "emqx.conf is not found in $EMQX_ETC_DIR" 1
-        maybe_use_portable_dynlibs
-        EMQX_BOOT_CONFIGS="$(call_hocon -s "$SCHEMA_MOD" -c "$EMQX_ETC_DIR"/emqx.conf multi_get "${CONF_KEYS[@]}")"
-    fi
-fi
-logdebug "EMQX_BOOT_CONFIGS: $EMQX_BOOT_CONFIGS"
-[ "$DEBUG" -eq 1 ] && set -x
-
-get_boot_config() {
-    path_to_value="$1"
-    echo -e "$EMQX_BOOT_CONFIGS" | $GREP "$path_to_value=" | sed -e "s/$path_to_value=//g" | tr -d \"
-}
-
-EPMD_ARGS="-start_epmd false -epmd_module ekka_epmd -proto_dist ekka"
-PROTO_DIST="$(get_boot_config 'cluster.proto_dist' || true)"
-TICKTIME="$(get_boot_config 'node.dist_net_ticktime' || echo '120')"
-# this environment variable is required by ekka_dist module
-# because proto_dist is overriden to ekka, and there is a lack of ekka_tls module
-export EKKA_PROTO_DIST_MOD="${PROTO_DIST:-inet_tcp}"
-if [ "$EKKA_PROTO_DIST_MOD" = 'inet_tls' ]; then
-    if [ "$IS_BOOT_COMMAND" = 'yes' ]; then
-        SSL_DIST_OPTFILE=${EMQX_SSL_DIST_OPTFILE:-"$EMQX_ETC_DIR/ssl_dist.conf"}
-        case "$SSL_DIST_OPTFILE" in
-            *\ *)
-                # there is unfortunately no way to support space for this option because we'd need to grep
-                # from 'ps -ef' result to get this option for non-boot commands (nodetool) to run
-                set +x
-                logerr "Got space in: $SSL_DIST_OPTFILE"
-                logerr "No space is allowed for Erlang distribution over SSL option file path."
-                logerr "Configure it from environment variable EMQX_SSL_DIST_OPTFILE."
-                logerr "Or make sure emqx root path '$RUNNER_ROOT_DIR' has no space"
-                exit 1
-                ;;
-            *)
-                true
-                ;;
-        esac
-    fi
-    EPMD_ARGS="${EPMD_ARGS} -ssl_dist_optfile $SSL_DIST_OPTFILE"
-fi
-
-DATA_DIR="$(get_boot_config 'node.data_dir')"
-# ensure no trailing /
-DATA_DIR="${DATA_DIR%/}"
-if [[ $DATA_DIR != /* ]]; then
-    # relative path
-    DATA_DIR="${RUNNER_ROOT_DIR}/${DATA_DIR}"
-fi
-CONFIGS_DIR="$DATA_DIR/configs"
-mkdir -p "$CONFIGS_DIR"
-
-check_license() {
-    if [ "$IS_ENTERPRISE" == "no" ]; then
-        return 0
-    fi
-
-    key_license="${EMQX_LICENSE__KEY:-$(get_boot_config 'license.key')}"
-
-    if [[ -n "$key_license" && ("$key_license" != "undefined") ]]; then
-      call_nodetool check_license_key "$key_license"
-    else
-      set +x
-      logerr "License not found."
-      logerr "Please specify one via the EMQX_LICENSE__KEY variable"
-      logerr "or via license.key in emqx-enterprise.conf."
-      return 1
-    fi
-}
-
-# When deciding which install upgrade script to run, we have to check
-# our own version so we may avoid infinite loops and call the correct
-# version.
-current_script_version() {
-  curr_script=$(basename "${BASH_SOURCE[0]}")
-  suffix=${curr_script#*-}
-  if [[ "${suffix}" == "${curr_script}" ]]; then
-    # there's no suffix, so we're running the default `emqx` script;
-    # we'll have to trust the REL_VSN variable
-    echo "$REL_VSN"
-  else
-    echo "${suffix}"
-  fi
-}
-
-parse_semver() {
-    echo "$1" | tr '.|-' ' '
-}
-
-max_version_of() {
-  local vsn1="$1"
-  local vsn2="$2"
-
-  echo "${vsn1}" "${vsn2}" | tr " " "\n" | sort -rV | head -n1
-}
-
-versioned_script_path() {
-  local script_name="$1"
-  local vsn="$2"
-
-  echo "$RUNNER_ROOT_DIR/bin/$script_name-$vsn"
-}
-
-does_script_version_exist() {
-  local script_name="$1"
-  local vsn="$2"
-
-  if [[ -f "$(versioned_script_path "$script_name" "$vsn")" ]]; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-# extract_from_package packege_path destination file1 file2
-extract_from_package() {
-  local package="$1"
-  local dest_dir="$2"
-  shift 2
-
-  tar -C "$dest_dir" -xf "$package" "$@"
-}
-
-am_i_the_newest_script() {
-  local curr_vsn other_vsn
-  curr_vsn="$(current_script_version)"
-  other_vsn="$1"
-  max_vsn="$(max_version_of "$other_vsn" "$curr_vsn")"
-
-  if [[ "$max_vsn" == "$curr_vsn" ]]; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-locate_package() {
-  local package_path candidates vsn
-  vsn="$1"
-
-  if [[ "${IS_ENTERPRISE}" == "yes" ]]; then
-    package_pattern="$RUNNER_ROOT_DIR/releases/emqx-enterprise-$vsn-*.tar.gz"
-  else
-    package_pattern="$RUNNER_ROOT_DIR/releases/emqx-$vsn-*.tar.gz"
-  fi
-
-  # shellcheck disable=SC2207,SC2086
-  candidates=($(ls $package_pattern))
-
-  if [[ "${#candidates[@]}" == 0 ]]; then
-    logerr "No package matching $package_pattern found."
-    exit 1
-  elif [[ "${#candidates[@]}" -gt 1 ]]; then
-    logerr "Multiple packages matching $package_pattern found.  Ensure only one exists."
-    exit 1
-  else
-    echo "${candidates[0]}"
-  fi
-}
-
-ensure_newest_script_is_extracted() {
-  local newest_vsn="$1"
-  local package_path tmpdir
-
-  if does_script_version_exist "emqx" "$newest_vsn" \
-     && does_script_version_exist "install_upgrade.escript" "$newest_vsn"; then
-    return
-  else
-    package_path="$(locate_package "$newest_vsn")"
-    tmpdir="$(mktemp -dp /tmp emqx.XXXXXXXXXXX)"
-
-    extract_from_package \
-      "$package_path" \
-      "$tmpdir" \
-      "bin/emqx-$newest_vsn" \
-      "bin/install_upgrade.escript-$newest_vsn"
-
-    cp "$tmpdir/bin/emqx-$newest_vsn" \
-       "$tmpdir/bin/install_upgrade.escript-$newest_vsn" \
-       "$RUNNER_ROOT_DIR/bin/"
-
-    rm -rf "$tmpdir"
-  fi
+    ERL_FLAGS="$ERL_FLAGS $EPMD_ARG" \
+    "$ERTS_DIR/bin/escript" "$ROOTDIR/bin/nodetool" "$NAME_TYPE" "$NAME" \
+                                -setcookie "$COOKIE" "$command" "$@"
 }
 
 # Run an escript in the node's environment
 relx_escript() {
     shift; scriptpath="$1"; shift
-    "$ERTS_DIR/bin/escript" "$RUNNER_ROOT_DIR/$scriptpath" "$@"
+    export RUNNER_ROOT_DIR
+
+    "$ERTS_DIR/bin/escript" "$ROOTDIR/$scriptpath" "$@"
 }
 
 # Output a start command for the last argument of run_erl
@@ -744,78 +228,91 @@ relx_start_command() {
            "$START_OPTION"
 }
 
-# Function to check configs without generating them
-check_config() {
-    ## this command checks the configs without generating any files
-    call_hocon -v -s "$SCHEMA_MOD" -c "$EMQX_ETC_DIR"/emqx.conf check_schema
+# Function to generate app.config and vm.args
+generate_config() {
+    ## Delete the *.siz files first or it cann't start after
+    ## changing the config 'log.rotation.size'
+    rm -rf "${RUNNER_LOG_DIR}"/*.siz
+
+    if [ "$CUTTLEFISH" != "yes" ]; then
+        # Note: we have added a parameter '-vm_args' to this. It
+        # appears redundant but it is not! the erlang vm allows us to
+        # access all arguments to the erl command EXCEPT '-args_file',
+        # so in order to get access to this file location from within
+        # the vm, we need to pass it in twice.
+        CONFIG_ARGS=" -config $RUNNER_ETC_DIR/app.config -args_file $RUNNER_ETC_DIR/vm.args -vm_args $RUNNER_ETC_DIR/vm.args "
+    else
+        EMQX_LICENSE_CONF_OPTION=""
+        if [ "${EMQX_LICENSE_CONF:-}" != "" ]; then
+            EMQX_LICENSE_CONF_OPTION="-i ${EMQX_LICENSE_CONF}"
+        fi
+
+        set +e
+        # shellcheck disable=SC2086
+        CUTTLEFISH_OUTPUT="$("$ERTS_PATH"/escript "$RUNNER_ROOT_DIR"/bin/cuttlefish -v -i "$REL_DIR"/emqx.schema $EMQX_LICENSE_CONF_OPTION -c "$RUNNER_ETC_DIR"/emqx.conf -d "$RUNNER_DATA_DIR"/configs generate)"
+        # shellcheck disable=SC2181
+        RESULT=$?
+        set -e
+        if [ $RESULT -gt 0 ]; then
+            echo "$CUTTLEFISH_OUTPUT"
+            exit $RESULT
+        fi
+        # print override from environment variables (EMQX_*)
+        echo "$CUTTLEFISH_OUTPUT" | sed -e '$d'
+        CONFIG_ARGS=$(echo "$CUTTLEFISH_OUTPUT" | tail -n 1)
+
+        ## Merge cuttlefish generated *.args into the vm.args
+        CUTTLE_GEN_ARG_FILE=$(echo "$CONFIG_ARGS" | sed -n 's/^.*\(vm_args[[:space:]]\)//p' | awk '{print $1}')
+        TMP_ARG_FILE="$RUNNER_DATA_DIR/configs/vm.args.tmp"
+        cp "$RUNNER_ETC_DIR/vm.args" "$TMP_ARG_FILE"
+        echo "" >> "$TMP_ARG_FILE"
+        echo "-pa ${REL_DIR}/consolidated" >> "$TMP_ARG_FILE"
+        sed '/^#/d' "$CUTTLE_GEN_ARG_FILE" | sed '/^$/d' | while IFS='' read -r ARG_LINE || [ -n "$ARG_LINE" ]; do
+            ARG_KEY=$(echo "$ARG_LINE" | awk '{$NF="";print}')
+            ARG_VALUE=$(echo "$ARG_LINE" | awk '{print $NF}')
+            if [ "$ARG_KEY" =  '' ]; then
+                ## for the flags, e.g. -heart -emu_args etc
+                ARG_KEY=$(echo "$ARG_LINE" | awk '{print $1}')
+                ARG_VALUE=''
+                TMP_ARG_KEY=$(grep "^$ARG_KEY" "$TMP_ARG_FILE" | awk '{print $1}')
+                if [ "$TMP_ARG_KEY" = '' ]; then
+                    echo "$ARG_KEY" >> "$TMP_ARG_FILE"
+                fi
+            else
+                TMP_ARG_VALUE=$(grep "^$ARG_KEY" "$TMP_ARG_FILE" | awk '{print $NF}')
+                if [ "$ARG_VALUE" != "$TMP_ARG_VALUE" ] ; then
+                    if [ -n "$TMP_ARG_VALUE" ]; then
+                        sh -c "$SED_REPLACE 's/^$ARG_KEY.*$/$ARG_LINE/' $TMP_ARG_FILE"
+                    else
+                        echo "$ARG_LINE" >> "$TMP_ARG_FILE"
+                    fi
+                fi
+            fi
+        done
+        mv -f "$TMP_ARG_FILE" "$CUTTLE_GEN_ARG_FILE"
+    fi
+
+    # shellcheck disable=SC2086
+    if ! relx_nodetool chkconfig $CONFIG_ARGS; then
+        echoerr "Error reading $CONFIG_ARGS"
+        exit 1
+    fi
 }
 
-# Function to generate app.config and vm.args
-# sets two environment variables CONF_FILE and ARGS_FILE
-generate_config() {
-    local name_type="$1"
-    local node_name="$2"
-    ## Delete the *.siz files first or it can't start after
-    ## changing the config 'log.rotation.size'
-    rm -f "${EMQX_LOG_DIR}"/*.siz
-
-    ## timestamp for each generation
-    local NOW_TIME
-    NOW_TIME="$(date +'%Y.%m.%d.%H.%M.%S')"
-
-    ## this command populates two files: app.<time>.config and vm.<time>.args
-    ## NOTE: the generate command merges environment variables to the base config (emqx.conf),
-    ## but does not include the cluster-override.conf and local-override.conf
-    ## meaning, certain overrides will not be mapped to app.<time>.config file
-    call_hocon -v -t "$NOW_TIME" -s "$SCHEMA_MOD" -c "$EMQX_ETC_DIR"/emqx.conf -d "$DATA_DIR"/configs generate
-
-    ## filenames are per-hocon convention
-    CONF_FILE="$CONFIGS_DIR/app.$NOW_TIME.config"
-    ARGS_FILE="$CONFIGS_DIR/vm.$NOW_TIME.args"
-
-    ## Merge hocon generated *.args into the vm.args
-    TMP_ARG_FILE="$CONFIGS_DIR/vm.args.tmp"
-    cp "$EMQX_ETC_DIR/vm.args" "$TMP_ARG_FILE"
-    echo "" >> "$TMP_ARG_FILE"
-    echo "-pa \"${REL_DIR}/consolidated\"" >> "$TMP_ARG_FILE"
-    ## read lines from generated vm.<time>.args file
-    ## drop comment lines, and empty lines using sed
-    ## pipe the lines to a while loop
-    sed '/^#/d' "$ARGS_FILE" | sed '/^$/d' | while IFS='' read -r ARG_LINE || [ -n "$ARG_LINE" ]; do
-        ## in the loop, split the 'key[:space:]value' pair
-        ARG_KEY=$(echo "$ARG_LINE" | awk '{$NF="";print}')
-        ARG_VALUE=$(echo "$ARG_LINE" | awk '{print $NF}')
-        ## use the key to look up in vm.args file for the value
-        TMP_ARG_VALUE=$($GREP "^$ARG_KEY" "$TMP_ARG_FILE" || true | awk '{print $NF}')
-        ## compare generated (to override) value to original (to be overridden) value
-        if [ "$ARG_VALUE" != "$TMP_ARG_VALUE" ] ; then
-            ## if they are different
-            if [ -n "$TMP_ARG_VALUE" ]; then
-                ## if the old value is present, replace it with generated value
-                sh -c "$SED_REPLACE 's|^$ARG_KEY.*$|$ARG_LINE|' \"$TMP_ARG_FILE\""
-            else
-                ## otherwise append generated value to the end
-                echo "$ARG_LINE" >> "$TMP_ARG_FILE"
-            fi
-        fi
-    done
-    echo "$name_type $node_name" >> "$TMP_ARG_FILE"
-    echo "-mnesia dir '\"$DATA_DIR/mnesia/$NAME\"'" >> "$TMP_ARG_FILE"
-    ## rename the generated vm.<time>.args file
-    mv -f "$TMP_ARG_FILE" "$ARGS_FILE"
+# Call bootstrapd for daemon commands like start/stop/console
+bootstrapd() {
+    if [ -e "$RUNNER_DATA_DIR/.erlang.cookie" ]; then
+        chown "$RUNNER_USER" "$RUNNER_DATA_DIR"/.erlang.cookie
+    fi
 }
 
 # check if a PID is down
-# shellcheck disable=SC2317 # call in func `nodetool_shutdown()`
 is_down() {
     PID="$1"
     if ps -p "$PID" >/dev/null; then
         # still around
         # shellcheck disable=SC2009 # this grep pattern is not a part of the progra names
-        if ps -p "$PID" | $GREP -q 'defunct'; then
-            # zombie state, print parent pid
-            parent="$(ps -o ppid= -p "$PID" | tr -d ' ')"
-            logwarn "$PID is marked <defunct>, parent: $(ps -p "$parent")"
+        if ps -p "$PID" | grep -q 'defunct'; then
             return 0
         fi
         return 1
@@ -842,213 +339,138 @@ wait_for() {
     done
 }
 
-wait_until_return_val() {
-    local RESULT
-    local WAIT_TIME
-    local CMD
-    RESULT="$1"
-    WAIT_TIME="$2"
-    shift 2
-    CMD="$*"
-    while true; do
-        if [ "$($CMD 2>/dev/null)" = "$RESULT" ]; then
-            return 0
-        fi
-        if [ "$WAIT_TIME" -le 0 ]; then
-            return 1
-        fi
-        WAIT_TIME=$((WAIT_TIME - 1))
-        sleep 1
-    done
-}
-
-# First, there is EMQX_DEFAULT_LOG_HANDLER which can control the default values
-# to be used when generating configs.
-# It's set in docker entrypoint and in systemd service file.
-#
-# To be backward compatible with 4.x and v5.0.0 ~ v5.0.24/e5.0.2:
-# if EMQX_LOG__TO is set, we try to enable handlers from environment variables.
-# i.e. it overrides the default value set in EMQX_DEFAULT_LOG_HANDLER
-tr_log_to_env() {
-    local log_to=${EMQX_LOG__TO:-undefined}
-    # unset because it's unknown to 5.0
-    unset EMQX_LOG__TO
-    case "${log_to}" in
-        console)
-            export EMQX_LOG__CONSOLE_HANDLER__ENABLE='true'
-            export EMQX_LOG__FILE_HANDLERS__DEFAULT__ENABLE='false'
-            ;;
-        file)
-            export EMQX_LOG__CONSOLE_HANDLER__ENABLE='false'
-            export EMQX_LOG__FILE_HANDLERS__DEFAULT__ENABLE='true'
-            ;;
-        both)
-            export EMQX_LOG__CONSOLE_HANDLER__ENABLE='true'
-            export EMQX_LOG__FILE_HANDLERS__DEFAULT__ENABLE='true'
-            ;;
-        default)
-            # want to use config file defaults, do nothing
-            ;;
-        undefined)
-            # value not set, do nothing
-            ;;
-        *)
-            logerr "Unknown environment value for EMQX_LOG__TO=${log_to} discarded"
-            ;;
-    esac
-}
-
-maybe_log_to_console() {
-    if [ "${EMQX_LOG__TO:-}" = 'default' ]; then
-        # want to use defaults, do nothing
-        unset EMQX_LOG__TO
+# Use $CWD/etc/sys.config if exists
+if [ -z "$RELX_CONFIG_PATH" ]; then
+    if [ -f "$RUNNER_ETC_DIR/sys.config" ]; then
+        RELX_CONFIG_PATH="-config $RUNNER_ETC_DIR/sys.config"
     else
-        tr_log_to_env
-        export EMQX_DEFAULT_LOG_HANDLER=${EMQX_DEFAULT_LOG_HANDLER:-console}
+        RELX_CONFIG_PATH=""
     fi
-}
-
-# Warn the user if ulimit -n is less than 1024
-maybe_warn_ulimit() {
-    ULIMIT_F=$(ulimit -n)
-    if [ "$ULIMIT_F" -lt 1024 ]; then
-        logwarn "ulimit -n is ${ULIMIT_F}; 1024 is the recommended minimum."
-    fi
-}
-
-## Possible ways to configure emqx node name:
-## 1. configure node.name in emqx.conf
-## 2. override with environment variable EMQX_NODE__NAME
-## Node name is either short-name (without '@'), e.g. 'emqx'
-## or long name (with '@') e.g. 'emqx@example.net' or 'emqx@127.0.0.1'
-NAME="${EMQX_NODE__NAME:-}"
-if [ -z "$NAME" ]; then
-    NAME="$(get_boot_config 'node.name')"
 fi
 
-# force to use 'emqx' short name
-[ -z "$NAME" ] && NAME='emqx'
-
-case "$NAME" in
-    *@*)
-        NAME_TYPE='-name'
-       ;;
-    *)
-        NAME_TYPE='-sname'
+IS_BOOT_COMMAND='no'
+case "$1" in
+    start|start_boot)
+        IS_BOOT_COMMAND='yes'
+        ;;
+    console|console_clean|console_boot)
+        IS_BOOT_COMMAND='yes'
+        ;;
+    foreground)
+        IS_BOOT_COMMAND='yes'
+        ;;
 esac
-SHORT_NAME="$(echo "$NAME" | awk -F'@' '{print $1}')"
-HOST_NAME="$(echo "$NAME" | awk -F'@' '{print $2}')"
-if ! (echo "$SHORT_NAME" | $GREP -q '^[0-9A-Za-z_\-]\+$'); then
-    logerr "Invalid node name, should be of format '^[0-9A-Za-z_-]+$'."
+
+
+if [ -z "$NAME_ARG" ]; then
+    NODENAME="${EMQX_NODE_NAME:-}"
+    # compatible with docker entrypoint
+    [ -z "$NODENAME" ] && [ -n "$EMQX_NAME" ] && [ -n "$EMQX_HOST" ] && NODENAME="${EMQX_NAME}@${EMQX_HOST}"
+    if [ -z "$NODENAME" ]; then
+        if [ "$IS_BOOT_COMMAND" = 'no' ]; then
+            # for non-boot commands, inspect vm.<time>.args for node name
+            # shellcheck disable=SC2012,SC2086
+            LATEST_VM_ARGS="$(ls -t $RUNNER_DATA_DIR/configs/vm.*.args | head -1)"
+            if [ -z "$LATEST_VM_ARGS" ]; then
+                echo "For command $1, there is no vm.*.args config file found in $RUNNER_DATA_DIR/configs/"
+                exit 1
+            fi
+            NODENAME="$(grep -E '^-name' "$LATEST_VM_ARGS" | awk '{print $2}')"
+        else
+            # for boot commands, inspect emqx.conf for node name
+            NODENAME=$("$ERTS_PATH"/escript "$RUNNER_ROOT_DIR"/bin/cuttlefish -i "$REL_DIR"/emqx.schema -c "$RUNNER_ETC_DIR"/emqx.conf get node.name)
+        fi
+    fi
+    if [ -z "$NODENAME" ]; then
+        echoerr "Failed to resolve emqx node name"
+        if [ "$IS_BOOT_COMMAND" = 'yes' ]; then
+            echoerr "Make sure runner has read permission on '$RUNNER_ETC_DIR/emqx.conf'"
+        fi
+        echoerr "Maybe override node name with environment variable ENQX_NODE_NAME='name@host.name'"
+        echoerr "or, EMQX_NAME='name' and EMQX_HOST='host.name'"
+        exit 1
+    fi
+    NAME_ARG="-name ${NODENAME# *}"
+fi
+
+# Extract the name type and name from the NAME_ARG for REMSH
+NAME_TYPE="$(echo "$NAME_ARG" | awk '{print $1}')"
+NAME="$(echo "$NAME_ARG" | awk '{print $2}')"
+NODENAME="$(echo "$NAME" | awk -F'@' '{print $1}')"
+export ESCRIPT_NAME="$NODENAME"
+
+PIPE_DIR="${PIPE_DIR:-/$RUNNER_DATA_DIR/${WHOAMI}_erl_pipes/$NAME/}"
+
+COOKIE="${EMQX_NODE_COOKIE:-}"
+if [ -z "$COOKIE" ]; then
+    if [ "$IS_BOOT_COMMAND" = 'yes' ]; then
+        COOKIE=$("$ERTS_PATH"/escript "$RUNNER_ROOT_DIR"/bin/cuttlefish -i "$REL_DIR"/emqx.schema -c "$RUNNER_ETC_DIR"/emqx.conf get node.cookie)
+    else
+        # shellcheck disable=SC2012,SC2086
+        LATEST_VM_ARGS="$(ls -t $RUNNER_DATA_DIR/configs/vm.*.args | head -1)"
+        if [ -z "$LATEST_VM_ARGS" ]; then
+            echo "For command $1, there is no vm.*.args config file found in $RUNNER_DATA_DIR/configs/"
+            exit 1
+        fi
+        COOKIE="$(grep -E '^-setcookie' "$LATEST_VM_ARGS" | awk '{print $2}')"
+    fi
+fi
+
+if [ -z "$COOKIE" ]; then
+    echoerr "Please set node.cookie in $RUNNER_ETC_DIR/emqx.conf or override from environment variable EMQX_NODE_COOKIE"
     exit 1
 fi
-# This also changes the program name from 'beam.smp' to node name
-# e.g. the 'ps' command output
-export ESCRIPT_NAME="$SHORT_NAME"
 
-PIPE_DIR="${PIPE_DIR:-/$DATA_DIR/${WHOAMI}_erl_pipes/$NAME/}"
-
-## Resolve Erlang cookie.
-if [ -n "${EMQX_NODE_COOKIE:-}" ]; then
-    ## To be backward compatible, read and unset EMQX_NODE_COOKIE
-    export EMQX_NODE__COOKIE="${EMQX_NODE_COOKIE}"
-    unset EMQX_NODE_COOKIE
-fi
-COOKIE="${EMQX_NODE__COOKIE:-}"
-COOKIE_IN_USE="$(get_boot_config 'node.cookie')"
-if [ "$IS_BOOT_COMMAND" != 'yes' ] && [ -n "$COOKIE_IN_USE" ] && [ -n "$COOKIE" ] && [ "$COOKIE" != "$COOKIE_IN_USE" ]; then
-    die "EMQX_NODE__COOKIE is different from the cookie used by $NAME"
-fi
-[ -z "$COOKIE" ] && COOKIE="$COOKIE_IN_USE"
-[ -z "$COOKIE" ] && COOKIE="$EMQX_DEFAULT_ERLANG_COOKIE"
-
-maybe_warn_default_cookie() {
-    if [ $IS_BOOT_COMMAND = 'yes' ] && [ "$COOKIE" = "$EMQX_DEFAULT_ERLANG_COOKIE" ]; then
-        logwarn "Default (insecure) Erlang cookie is in use."
-        logwarn "Configure node.cookie in $EMQX_ETC_DIR/emqx.conf or override from environment variable EMQX_NODE__COOKIE"
-        logwarn "NOTE: Use the same cookie for all nodes in the cluster."
-    fi
-}
-
-## check if OTP version has mnesia_hook feature; if not, fallback to
-## using Mnesia DB backend.
-if [[ "$IS_BOOT_COMMAND" == 'yes' && "$(get_boot_config 'node.db_backend')" == "rlog" ]]; then
-    if ! (echo -e "$COMPATIBILITY_INFO" | $GREP -q 'MNESIA_OK'); then
-      logerr "DB Backend is RLOG, but an incompatible OTP version has been detected. Falling back to using Mnesia DB backend."
-      export EMQX_NODE__DB_BACKEND=mnesia
-      export EMQX_NODE__DB_ROLE=core
-    fi
+# Support for IPv6 Dist. See: https://github.com/emqtt/emqttd/issues/1460
+PROTO_DIST=$(grep -E '^[ \t]*cluster.proto_dist[ \t]*=[ \t]*' "$RUNNER_ETC_DIR/emqx.conf" 2> /dev/null | tail -1 | awk -F"= " '{print $NF}')
+if [ -z "$PROTO_DIST" ]; then
+    PROTO_DIST_ARG=""
+else
+    PROTO_DIST_ARG="-proto_dist $PROTO_DIST"
 fi
 
-diagnose_boot_failure_and_die() {
-    local ps_line
-    ps_line="$(find_emqx_process)"
-    if [ -z "$ps_line" ]; then
-        echo "Find more information in the latest log file: ${EMQX_LOG_DIR}/erlang.log.*"
-        exit 1
-    fi
-    if ! relx_nodetool "ping" > /dev/null; then
-        logerr "$NAME seems to be running, but not responding to pings."
-        echo "Make sure '$HOST_NAME' is a resolvable and reachable hostname."
-        pipe_shutdown
-        exit 2
-    fi
-    if ! relx_nodetool 'eval' 'true = emqx:is_running()' > /dev/null; then
-        logerr "$NAME node is started, but failed to complete the boot sequence in time."
-        echo "Please collect the logs in ${EMQX_LOG_DIR} and report a bug to EMQX team at https://github.com/emqx/emqx/issues/new/choose"
-        pipe_shutdown
-        exit 3
-    fi
-}
+cd "$ROOTDIR"
 
-## Only works when started in daemon mode
-pipe_shutdown() {
-    if [ -d "$PIPE_DIR" ]; then
-        echo "Shutting down $NAME from to_erl pipe."
-        ## can not evaluate init:stop() or erlang:halt() because the shell is restricted
-        echo 'emqx_machine:brutal_shutdown().' | "$BINDIR/to_erl" "$PIPE_DIR"
-    fi
-}
+# User can specify an sname without @hostname
+# This will fail when creating remote shell
+# So here we check for @ and add @hostname if missing
+case $NAME in
+    *@*)
+        # Nothing to do
+        ;;
+    *)
+        NAME=$NAME@$(relx_get_nodename)
+        ;;
+esac
+MNESIA_DATA_DIR="$RUNNER_DATA_DIR/mnesia/$NAME"
 
-## Call nodetool to stop EMQX
-nodetool_shutdown() {
-    # Wait for the node to completely stop...
-    PID="$(relx_get_pid)"
-    if ! relx_nodetool "stop"; then
-        die "Graceful shutdown failed PID=[$PID]"
-    fi
-    WAIT_TIME="${EMQX_WAIT_FOR_STOP:-120}"
-    if ! wait_for "$WAIT_TIME" 'is_down' "$PID"; then
-        msg="dangling after ${WAIT_TIME} seconds"
-        # also log to syslog
-        logger -t "${REL_NAME}[${PID}]" "STOP: $msg"
-        # log to user console
-        set +x
-        logerr "Stop failed, $msg"
-        echo "ERROR: $PID is still around"
-        ps -p "$PID"
-        exit 1
-    fi
-    echo "ok"
-    logger -t "${REL_NAME}[${PID}]" "STOP: OK"
-}
-
-cd "$RUNNER_ROOT_DIR"
-
-case "${COMMAND}" in
-    start)
-        maybe_warn_ulimit
-        maybe_warn_default_cookie
+# Check the first argument for instructions
+case "$1" in
+    start|start_boot)
+        # Make sure a node IS not running
+        if relx_nodetool "ping" >/dev/null 2>&1; then
+            echo "Node is already running!"
+            exit 1
+        fi
+        # Bootstrap daemon command (check perms & drop to $RUNNER_USER)
+        bootstrapd
 
         # this flag passes down to console mode
         # so we know it's intended to be run in daemon mode
-        export _EMQX_START_DAEMON_MODE=1
+        export _EMQX_START_MODE="$1"
 
-        case "$COMMAND" in
+        # Save this for later.
+        CMD=$1
+        case "$1" in
             start)
                 shift
                 START_OPTION="console"
                 HEART_OPTION="start"
+                ;;
+            start_boot)
+                shift
+                START_OPTION="console_boot"
+                HEART_OPTION="start_boot"
                 ;;
         esac
         RUN_PARAM="$*"
@@ -1058,7 +480,7 @@ case "${COMMAND}" in
         [ "$RUN_PARAM" ] && set -- "$@" "$RUN_PARAM"
 
         # Export the HEART_COMMAND
-        HEART_COMMAND="$RUNNER_SCRIPT $COMMAND"
+        HEART_COMMAND="$RUNNER_SCRIPT $CMD"
         export HEART_COMMAND
 
         ## See: http://erlang.org/doc/man/run_erl.html
@@ -1070,24 +492,51 @@ case "${COMMAND}" in
 
         mkdir -p "$PIPE_DIR"
 
-        "$BINDIR/run_erl" -daemon "$PIPE_DIR" "$EMQX_LOG_DIR" \
+        "$BINDIR/run_erl" -daemon "$PIPE_DIR" "$RUNNER_LOG_DIR" \
                           "$(relx_start_command)"
 
-        WAIT_TIME=${EMQX_WAIT_FOR_START:-120}
-        if wait_until_return_val "true" "$WAIT_TIME" 'relx_nodetool' \
-                'eval' 'emqx:is_running()'; then
-            echo "$EMQX_DESCRIPTION $REL_VSN is started successfully!"
-            exit 0
-        else
-            logerr "${EMQX_DESCRIPTION} ${REL_VSN} using node name '${NAME}' failed ${WAIT_TIME} probes."
-            diagnose_boot_failure_and_die
-        fi
+        WAIT_TIME=${WAIT_FOR_ERLANG:-15}
+        while [ "$WAIT_TIME" -gt 0 ]; do
+            if ! relx_nodetool "ping" >/dev/null 2>&1; then
+                WAIT_TIME=$((WAIT_TIME - 1))
+                sleep 1
+                continue
+            fi
+            sleep 1
+            if relx_nodetool "ping" >/dev/null 2>&1; then
+                echo "$EMQX_DESCRIPTION $REL_VSN is started successfully!"
+                exit 0
+            fi
+        done && echo "$EMQX_DESCRIPTION $REL_VSN failed to start within ${WAIT_FOR_ERLANG:-15} seconds,"
+        echo "see the output of '$0 console' for more information."
+        echo "If you want to wait longer, set the environment variable"
+        echo "WAIT_FOR_ERLANG to the number of seconds to wait."
+        exit 1
         ;;
 
     stop)
-        if ! nodetool_shutdown; then
-            pipe_shutdown
+        # Wait for the node to completely stop...
+        PID="$(relx_get_pid)"
+        if ! relx_nodetool "stop"; then
+            exit 1
         fi
+        WAIT_TIME="${EMQX_WAIT_FOR_STOP:-120}"
+        if ! wait_for "$WAIT_TIME" 'is_down' "$PID"; then
+            msg="dangling after ${WAIT_TIME} seconds"
+            # also log to syslog
+            logger -t "${REL_NAME}[${PID}]" "STOP: $msg"
+            # log to user console
+            echoerr "Stop failed, $msg"
+            echo "ERROR: $PID is still around"
+            ps -p "$PID"
+            exit 1
+        fi
+        logger -t "${REL_NAME}[${PID}]" "STOP: OK"
+        ;;
+
+    restart|reboot)
+        echo "$EMQX_DESCRIPTION $REL_VSN is stopped: $("$RUNNER_BIN_DIR"/emqx stop)"
+        "$RUNNER_BIN_DIR"/emqx start
         ;;
 
     pid)
@@ -1098,8 +547,10 @@ case "${COMMAND}" in
         ;;
 
     ping)
-        assert_node_alive
-        echo pong
+        ## See if the VM is alive
+        if ! relx_nodetool "ping"; then
+            exit 1
+        fi
         ;;
 
     escript)
@@ -1110,61 +561,76 @@ case "${COMMAND}" in
         ;;
 
     attach)
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
+
+        # Bootstrap daemon command (check perms & drop to $RUNNER_USER)
+        bootstrapd
+
+        shift
         exec "$BINDIR/to_erl" "$PIPE_DIR"
         ;;
 
     remote_console)
-        assert_node_alive
-
-        shift
-        remsh
-        ;;
-
-    upgrade|downgrade|install|unpack|uninstall)
-        if [ -z "${2:-}" ]; then
-            echo "Missing version argument"
-            echo "Usage: $REL_NAME $COMMAND {version}"
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
             exit 1
         fi
 
+        # Bootstrap daemon command (check perms & drop to $RUNNER_USER)
+        bootstrapd
+
         shift
+        relx_rem_sh
+        ;;
 
-        assert_node_alive
-
-        curr_vsn="$(current_script_version)"
-        target_vsn="$1"
-        newest_vsn="$(max_version_of "$target_vsn" "$curr_vsn")"
-        ensure_newest_script_is_extracted "$newest_vsn"
-        # if we are not the newest script, run the same command from it
-        if ! am_i_the_newest_script "$newest_vsn"; then
-          script_path="$(versioned_script_path emqx "$newest_vsn")"
-          exec "$script_path" "$COMMAND" "$@"
+    upgrade|downgrade|install|unpack|uninstall)
+        if [ -z "$2" ]; then
+            echo "Missing version argument"
+            echo "Usage: $REL_NAME $1 {version}"
+            exit 1
         fi
 
-        upgrade_script_path="$(versioned_script_path install_upgrade.escript "$newest_vsn")"
-        echo "using ${upgrade_script_path} to run ${COMMAND} $*"
+        COMMAND="$1"; shift
 
-        ERL_FLAGS="${ERL_FLAGS:-} $EPMD_ARGS" \
-        exec "$BINDIR/escript" "$upgrade_script_path" \
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
+
+        ERL_FLAGS="$ERL_FLAGS $EPMD_ARG" \
+        exec "$BINDIR/escript" "$ROOTDIR/bin/install_upgrade.escript" \
              "$COMMAND" "{'$REL_NAME', \"$NAME_TYPE\", '$NAME', '$COOKIE'}" "$@"
         ;;
 
     versions)
-        assert_node_alive
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
 
-        shift
+        COMMAND="$1"; shift
 
-        ERL_FLAGS="${ERL_FLAGS:-} $EPMD_ARGS" \
-        exec "$BINDIR/escript" "$RUNNER_ROOT_DIR/bin/install_upgrade.escript" \
+        ERL_FLAGS="$ERL_FLAGS $EPMD_ARG" \
+        exec "$BINDIR/escript" "$ROOTDIR/bin/install_upgrade.escript" \
              "versions" "{'$REL_NAME', \"$NAME_TYPE\", '$NAME', '$COOKIE'}" "$@"
         ;;
 
-    console|console_clean|foreground)
+    console|console_clean|console_boot)
+        # Bootstrap daemon command (check perms & drop to $RUNNER_USER)
+        bootstrapd
+
         # .boot file typically just $REL_NAME (ie, the app name)
         # however, for debugging, sometimes start_clean.boot is useful.
         # For e.g. 'setup', one may even want to name another boot script.
-        case "$COMMAND" in
-            console|foreground)
+        case "$1" in
+            console)
                 if [ -f "$REL_DIR/$REL_NAME.boot" ]; then
                   BOOTFILE="$REL_DIR/$REL_NAME"
                 else
@@ -1174,128 +640,134 @@ case "${COMMAND}" in
             console_clean)
                 BOOTFILE="$REL_DIR/start_clean"
                 ;;
-        esac
-        case "$COMMAND" in
-            foreground)
-                FOREGROUNDOPTIONS="-noshell -noinput +Bd"
-                ;;
-            *)
-                FOREGROUNDOPTIONS=''
+            console_boot)
+                shift
+                BOOTFILE="$1"
+                shift
                 ;;
         esac
 
         # set before generate_config
-        if [ "${_EMQX_START_DAEMON_MODE:-}" = 1 ]; then
-            tr_log_to_env
-        else
-            maybe_log_to_console
-            maybe_warn_ulimit
-            maybe_warn_default_cookie
+        if [ "${_EMQX_START_MODE:-}" = '' ]; then
+            export EMQX_LOG__TO="${EMQX_LOG__TO:-console}"
         fi
 
         #generate app.config and vm.args
-        generate_config "$NAME_TYPE" "$NAME"
-
-        check_license
+        generate_config
 
         # Setup beam-required vars
         EMU="beam"
-        PROGNAME="${0}"
+        PROGNAME="${0#*/}"
 
         export EMU
         export PROGNAME
 
         # Store passed arguments since they will be erased by `set`
-        # add emqx_data_dir to boot command so it is visible from 'ps -ef'
         ARGS="$*"
 
-        # shellcheck disable=SC2086
+        # shellcheck disable=SC2086 # $RELX_CONFIG_PATH $CONFIG_ARGS $EPMD_ARG are supposed to be split by whitespace
         # Build an array of arguments to pass to exec later on
         # Build it here because this command will be used for logging.
-        if [ "$IS_ELIXIR" = no ] || [ "${EMQX_CONSOLE_FLAVOR:-}" = 'erl' ] ; then
-            # pass down RELEASE_LIB so we can switch to IS_ELIXIR=no
-            # to boot an Erlang node from the elixir release
-            set -- "$BINDIR/erlexec" \
-                $FOREGROUNDOPTIONS \
-                -boot "$BOOTFILE" \
-                -boot_var RELEASE_LIB "$ERTS_LIB_DIR" \
-                -boot_var ERTS_LIB_DIR "$ERTS_LIB_DIR" \
-                -mode "$CODE_LOADING_MODE" \
-                -config "$CONF_FILE" \
-                -args_file "$ARGS_FILE" \
-                $EPMD_ARGS
-        else
-            set -- "$REL_DIR/iex" \
-                --boot "$BOOTFILE" \
-                --boot-var RELEASE_LIB "${ERTS_LIB_DIR}" \
-                --erl-config "${CONF_FILE}" \
-                --vm-args "${ARGS_FILE}" \
-                --erl "$FOREGROUNDOPTIONS" \
-                --erl "-mode $CODE_LOADING_MODE" \
-                --erl "$EPMD_ARGS" \
-                --werl
-        fi
+        set -- "$BINDIR/erlexec" \
+            -boot "$BOOTFILE" -mode "$CODE_LOADING_MODE" \
+            -boot_var ERTS_LIB_DIR "$ERTS_LIB_DIR" \
+            -mnesia dir "\"${MNESIA_DATA_DIR}\"" \
+            $RELX_CONFIG_PATH $CONFIG_ARGS $EPMD_ARG
 
         # Log the startup
-        logger -t "${REL_NAME}[$$]" "EXEC: $* -- ${1+$ARGS} -emqx_data_dir ${DATA_DIR}"
+        logger -t "${REL_NAME}[$$]" "$* -- ${1+$ARGS}"
 
         # Start the VM
-        exec "$@" -- ${1+$ARGS} -emqx_data_dir "${DATA_DIR}"
+        exec "$@" -- ${1+$ARGS}
         ;;
 
-    ctl)
-        assert_node_alive
+    foreground)
+        # Bootstrap daemon command (check perms & drop to $RUNNER_USER)
+        bootstrapd
+        # start up the release in the foreground for use by runit
+        # or other supervision services
 
-        shift
+        # set before generate_config
+        export EMQX_LOG__TO="${EMQX_LOG__TO:-console}"
 
-        relx_nodetool rpc_infinity emqx_ctl run_command "$@"
+        #generate app.config and vm.args
+        generate_config
+
+        [ -f "$REL_DIR/$REL_NAME.boot" ] && BOOTFILE="$REL_NAME" || BOOTFILE=start
+        FOREGROUNDOPTIONS="-noshell -noinput +Bd"
+
+        # Setup beam-required vars
+        EMU=beam
+        PROGNAME="${0#*/}"
+
+        export EMU
+        export PROGNAME
+
+        # Store passed arguments since they will be erased by `set`
+        ARGS="$*"
+
+        # shellcheck disable=SC2086 # $RELX_CONFIG_PATH $CONFIG_ARGS $EPMD_ARG are supposed to be split by whitespace
+        # Build an array of arguments to pass to exec later on
+        # Build it here because this command will be used for logging.
+        set -- "$BINDIR/erlexec" $FOREGROUNDOPTIONS \
+            -boot "$REL_DIR/$BOOTFILE" -mode "$CODE_LOADING_MODE" \
+            -boot_var ERTS_LIB_DIR "$ERTS_LIB_DIR" \
+            -mnesia dir "\"${MNESIA_DATA_DIR}\"" \
+            $RELX_CONFIG_PATH $CONFIG_ARGS $EPMD_ARG
+
+        # Log the startup
+        logger -t "${REL_NAME}[$$]" "$* -- ${1+$ARGS}"
+
+        # Start the VM
+        exec "$@" -- ${1+$ARGS}
+        ;;
+    ertspath)
+        echo "$ERTS_PATH"
         ;;
     rpc)
-        assert_node_alive
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
 
         shift
 
         relx_nodetool rpc "$@"
         ;;
     rpcterms)
-        assert_node_alive
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
 
         shift
 
         relx_nodetool rpcterms "$@"
         ;;
+    root_dir)
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
+
+        shift
+        relx_nodetool "eval" 'code:root_dir()'
+        ;;
     eval)
-        assert_node_alive
+        # Make sure a node IS running
+        if ! relx_nodetool "ping" > /dev/null; then
+            echo "Node is not running!"
+            exit 1
+        fi
 
         shift
         relx_nodetool "eval" "$@"
         ;;
-    eval-ex)
-        assert_node_alive
-
-        shift
-        if [ "$IS_ELIXIR" = "yes" ]
-        then
-          "$REL_DIR/elixir" \
-              --hidden \
-              --name "rand-$(gen_node_id)-$NAME" \
-              --cookie "$COOKIE" \
-              --boot "$REL_DIR/start_clean" \
-              --boot-var RELEASE_LIB "$ERTS_LIB_DIR" \
-              --vm-args "$REL_DIR/remote.vm.args" \
-              --erl "-start_epmd false -epmd_module ekka_epmd" \
-              --rpc-eval "$NAME" "$@"
-        else
-            echo "EMQX node is not an Elixir node"
-            usage "$COMMAND"
-            exit 1
-        fi
-        ;;
-    check_config)
-        check_config
-        ;;
     *)
-        usage "$COMMAND"
+        relx_usage "$1"
         exit 1
         ;;
 esac

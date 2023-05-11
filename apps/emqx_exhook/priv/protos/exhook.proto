@@ -1,5 +1,5 @@
 //------------------------------------------------------------------------------
-// Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+// Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,15 +16,13 @@
 
 syntax = "proto3";
 
-option csharp_namespace = "Emqx.Exhook.V2";
+option csharp_namespace = "Emqx.Exhook.V1";
 option go_package = "emqx.io/grpc/exhook";
 option java_multiple_files = true;
 option java_package = "io.emqx.exhook";
 option java_outer_classname = "EmqxExHookProto";
 
-// The exhook proto version should be fixed as `v2` in EMQX v5.x
-// to make sure the exhook proto version is compatible
-package emqx.exhook.v2;
+package emqx.exhook.v1;
 
 service HookProvider {
 
@@ -42,7 +40,7 @@ service HookProvider {
 
   rpc OnClientAuthenticate(ClientAuthenticateRequest) returns (ValuedResponse) {};
 
-  rpc OnClientAuthorize(ClientAuthorizeRequest) returns (ValuedResponse) {};
+  rpc OnClientCheckAcl(ClientCheckAclRequest) returns (ValuedResponse) {};
 
   rpc OnClientSubscribe(ClientSubscribeRequest) returns (EmptySuccess) {};
 
@@ -58,7 +56,7 @@ service HookProvider {
 
   rpc OnSessionDiscarded(SessionDiscardedRequest) returns (EmptySuccess) {};
 
-  rpc OnSessionTakenover(SessionTakenoverRequest) returns (EmptySuccess) {};
+  rpc OnSessionTakeovered(SessionTakeoveredRequest) returns (EmptySuccess) {};
 
   rpc OnSessionTerminated(SessionTerminatedRequest) returns (EmptySuccess) {};
 
@@ -72,20 +70,20 @@ service HookProvider {
 }
 
 //------------------------------------------------------------------------------
-// Request
+// Request & Response
 //------------------------------------------------------------------------------
 
 message ProviderLoadedRequest {
 
   BrokerInfo broker = 1;
-
-  RequestMeta meta = 2;
 }
 
-message ProviderUnloadedRequest {
+message LoadedResponse {
 
-  RequestMeta meta = 1;
+  repeated HookSpec hooks = 1;
 }
+
+message ProviderUnloadedRequest { }
 
 message ClientConnectRequest {
 
@@ -95,8 +93,6 @@ message ClientConnectRequest {
   //
   // It should be empty on MQTT v3.1.1/v3.1 or others protocol
   repeated Property props = 2;
-
-  RequestMeta meta = 3;
 }
 
 message ClientConnackRequest {
@@ -106,15 +102,11 @@ message ClientConnackRequest {
   string result_code = 2;
 
   repeated Property props = 3;
-
-  RequestMeta meta = 4;
 }
 
 message ClientConnectedRequest {
 
   ClientInfo clientinfo = 1;
-
-  RequestMeta meta = 2;
 }
 
 message ClientDisconnectedRequest {
@@ -122,8 +114,6 @@ message ClientDisconnectedRequest {
   ClientInfo clientinfo = 1;
 
   string reason = 2;
-
-  RequestMeta meta = 3;
 }
 
 message ClientAuthenticateRequest {
@@ -131,28 +121,24 @@ message ClientAuthenticateRequest {
   ClientInfo clientinfo = 1;
 
   bool result = 2;
-
-  RequestMeta meta = 3;
 }
 
-message ClientAuthorizeRequest {
+message ClientCheckAclRequest {
 
   ClientInfo clientinfo = 1;
 
-  enum AuthorizeReqType {
+  enum AclReqType {
 
     PUBLISH = 0;
 
     SUBSCRIBE = 1;
   }
 
-  AuthorizeReqType type = 2;
+  AclReqType type = 2;
 
   string topic = 3;
 
   bool result = 4;
-
-  RequestMeta meta = 5;
 }
 
 message ClientSubscribeRequest {
@@ -162,8 +148,6 @@ message ClientSubscribeRequest {
   repeated Property props = 2;
 
   repeated TopicFilter topic_filters = 3;
-
-  RequestMeta meta = 4;
 }
 
 message ClientUnsubscribeRequest {
@@ -173,15 +157,11 @@ message ClientUnsubscribeRequest {
   repeated Property props = 2;
 
   repeated TopicFilter topic_filters = 3;
-
-  RequestMeta meta = 4;
 }
 
 message SessionCreatedRequest {
 
   ClientInfo clientinfo = 1;
-
-  RequestMeta meta = 2;
 }
 
 message SessionSubscribedRequest {
@@ -191,8 +171,6 @@ message SessionSubscribedRequest {
   string topic = 2;
 
   SubOpts subopts = 3;
-
-  RequestMeta meta = 4;
 }
 
 message SessionUnsubscribedRequest {
@@ -200,29 +178,21 @@ message SessionUnsubscribedRequest {
   ClientInfo clientinfo = 1;
 
   string topic = 2;
-
-  RequestMeta meta = 3;
 }
 
 message SessionResumedRequest {
 
   ClientInfo clientinfo = 1;
-
-  RequestMeta meta = 2;
 }
 
 message SessionDiscardedRequest {
 
   ClientInfo clientinfo = 1;
-
-  RequestMeta meta = 2;
 }
 
-message SessionTakenoverRequest {
+message SessionTakeoveredRequest {
 
   ClientInfo clientinfo = 1;
-
-  RequestMeta meta = 2;
 }
 
 message SessionTerminatedRequest {
@@ -230,15 +200,11 @@ message SessionTerminatedRequest {
   ClientInfo clientinfo = 1;
 
   string reason = 2;
-
-  RequestMeta meta = 3;
 }
 
 message MessagePublishRequest {
 
   Message message = 1;
-
-  RequestMeta meta = 2;
 }
 
 message MessageDeliveredRequest {
@@ -246,8 +212,6 @@ message MessageDeliveredRequest {
   ClientInfo clientinfo = 1;
 
   Message message = 2;
-
-  RequestMeta meta = 3;
 }
 
 message MessageDroppedRequest {
@@ -255,8 +219,6 @@ message MessageDroppedRequest {
   Message message = 1;
 
   string reason = 2;
-
-  RequestMeta meta = 3;
 }
 
 message MessageAckedRequest {
@@ -264,29 +226,20 @@ message MessageAckedRequest {
   ClientInfo clientinfo = 1;
 
   Message message = 2;
-
-  RequestMeta meta = 3;
 }
 
 //------------------------------------------------------------------------------
-// Response
+// Basic data types
 //------------------------------------------------------------------------------
 
-// Responsed by `ProviderLoadedRequest`
-
-message LoadedResponse {
-
-  repeated HookSpec hooks = 1;
-}
-
-// Responsed by `ClientAuthenticateRequest` `ClientAuthorizeRequest` `MessagePublishRequest`
+message EmptySuccess { }
 
 message ValuedResponse {
 
-  // The responded value type
-  //  - contiune: Use the responded value and execute the next hook
-  //  - ignore: Ignore the responded value
-  //  - stop_and_return: Use the responded value and stop the chain executing
+  // The responsed value type
+  //  - contiune: Use the responsed value and execute the next hook
+  //  - ignore: Ignore the responsed value
+  //  - stop_and_return: Use the responsed value and stop the chain executing
   enum ResponsedType {
 
     CONTINUE = 0;
@@ -300,7 +253,7 @@ message ValuedResponse {
 
   oneof value {
 
-    // Boolean result, used on the 'client.authenticate', 'client.authorize' hooks
+    // Boolean result, used on the 'client.authenticate', 'client.check_acl' hooks
     bool bool_result = 3;
 
     // Message result, used on the 'message.*' hooks
@@ -308,25 +261,16 @@ message ValuedResponse {
   }
 }
 
-// no Response by other Requests
-
-message EmptySuccess { }
-
-//------------------------------------------------------------------------------
-// Basic data types
-//------------------------------------------------------------------------------
-
 message BrokerInfo {
 
   string version = 1;
 
   string sysdescr = 2;
 
-  int64 uptime = 3;
+  string uptime = 3;
 
   string datetime = 4;
 }
-
 
 message HookSpec {
 
@@ -335,12 +279,12 @@ message HookSpec {
   // Available value:
   //   "client.connect",      "client.connack"
   //   "client.connected",    "client.disconnected"
-  //   "client.authenticate", "client.authorize"
+  //   "client.authenticate", "client.check_acl"
   //   "client.subscribe",    "client.unsubscribe"
   //
   //   "session.created",      "session.subscribed"
   //   "session.unsubscribed", "session.resumed"
-  //   "session.discarded",    "session.takenover"
+  //   "session.discarded",    "session.takeovered"
   //   "session.terminated"
   //
   //   "message.publish", "message.delivered"
@@ -414,31 +358,6 @@ message Message {
   bytes  payload = 6;
 
   uint64 timestamp = 7;
-
-  // The key of header can be:
-  //  - username:
-  //    * Readonly
-  //    * The username of sender client
-  //    * Value type: utf8 string
-  //  - protocol:
-  //    * Readonly
-  //    * The protocol name of sender client
-  //    * Value type: string enum with "mqtt", "mqtt-sn", ...
-  //  - peerhost:
-  //    * Readonly
-  //    * The peerhost of sender client
-  //    * Value type: ip address string
-  //  - allow_publish:
-  //    * Writable
-  //    * Whether to allow the message to be published by emqx
-  //    * Value type: string enum with "true", "false", default is "true"
-  //
-  // Notes: All header may be missing, which means that the message does not
-  //   carry these headers. We can guarantee that clients coming from MQTT,
-  //   MQTT-SN, CoAP, LwM2M and other natively supported protocol clients will
-  //   carry these headers, but there is no guarantee that messages published
-  //   by other means will do, e.g. messages published by HTTP-API
-  map<string, string> headers = 8;
 }
 
 message Property {
@@ -485,15 +404,4 @@ message SubOpts {
   // If the value is 1, Application Messages MUST NOT be forwarded to a
   // connection with a ClientID equal to the ClientID of the publishing
   uint32 nl = 5;
-}
-
-message RequestMeta {
-
-  string node = 1;
-
-  string version = 2;
-
-  string sysdescr = 3;
-
-  string cluster_name = 4;
 }

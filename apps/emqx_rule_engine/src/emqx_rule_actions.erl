@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,213 +18,196 @@
 -module(emqx_rule_actions).
 
 -include("rule_engine.hrl").
--include_lib("emqx/include/logger.hrl").
+-include("rule_actions.hrl").
 -include_lib("emqx/include/emqx.hrl").
+-include_lib("emqx/include/logger.hrl").
 
-%% APIs
--export([parse_action/1]).
+-define(REPUBLISH_PARAMS_SPEC, #{
+            target_topic => #{
+                order => 1,
+                type => string,
+                required => true,
+                default => <<"repub/to/${clientid}">>,
+                title => #{en => <<"Target Topic">>,
+                           zh => <<"目的主题"/utf8>>},
+                description => #{en => <<"To which topic the message will be republished">>,
+                                 zh => <<"重新发布消息到哪个主题"/utf8>>}
+            },
+            target_qos => #{
+                order => 2,
+                type => number,
+                enum => [-1, 0, 1, 2],
+                required => true,
+                default => 0,
+                title => #{en => <<"Target QoS">>,
+                           zh => <<"目的 QoS"/utf8>>},
+                description => #{en => <<"The QoS Level to be uses when republishing the message. Set to -1 to use the original QoS">>,
+                                 zh => <<"重新发布消息时用的 QoS 级别, 设置为 -1 以使用原消息中的 QoS"/utf8>>}
+            },
+            payload_tmpl => #{
+                order => 3,
+                type => string,
+                input => textarea,
+                required => false,
+                default => <<"${payload}">>,
+                title => #{en => <<"Payload Template">>,
+                           zh => <<"消息内容模板"/utf8>>},
+                description => #{en => <<"The payload template, variable interpolation is supported">>,
+                                 zh => <<"消息内容模板，支持变量"/utf8>>}
+            }
+        }).
 
-%% callbacks of emqx_rule_action
--export([pre_process_action_args/2]).
+-rule_action(#{name => inspect,
+               category => debug,
+               for => '$any',
+               types => [],
+               create => on_action_create_inspect,
+               params => #{},
+               title => #{en => <<"Inspect (debug)">>,
+                          zh => <<"检查 (调试)"/utf8>>},
+               description => #{en => <<"Inspect the details of action params for debug purpose">>,
+                                zh => <<"检查动作参数 (用以调试)"/utf8>>}
+              }).
 
-%% action functions
--export([
-    console/3,
-    republish/3
-]).
+-rule_action(#{name => republish,
+               category => data_forward,
+               for => '$any',
+               types => [],
+               create => on_action_create_republish,
+               params => ?REPUBLISH_PARAMS_SPEC,
+               title => #{en => <<"Republish">>,
+                          zh => <<"消息重新发布"/utf8>>},
+               description => #{en => <<"Republish a MQTT message to another topic">>,
+                                zh => <<"重新发布消息到另一个主题"/utf8>>}
+              }).
 
--optional_callbacks([pre_process_action_args/2]).
+-rule_action(#{name => do_nothing,
+               category => debug,
+               for => '$any',
+               types => [],
+               create => on_action_create_do_nothing,
+               params => #{},
+               title => #{en => <<"Do Nothing (debug)">>,
+                          zh => <<"空动作 (调试)"/utf8>>},
+               description => #{en => <<"This action does nothing and never fails. It's for debug purpose">>,
+                                zh => <<"此动作什么都不做，并且不会失败 (用以调试)"/utf8>>}
+              }).
 
--callback pre_process_action_args(FuncName :: atom(), action_fun_args()) -> action_fun_args().
+-export([on_resource_create/2]).
 
--define(ORIGINAL_USER_PROPERTIES, original).
+%% callbacks for rule engine
+-export([ on_action_create_inspect/2
+        , on_action_create_republish/2
+        , on_action_create_do_nothing/2
+        ]).
 
-%%--------------------------------------------------------------------
-%% APIs
-%%--------------------------------------------------------------------
-parse_action(#{function := ActionFunc} = Action) ->
-    {Mod, Func} = parse_action_func(ActionFunc),
-    #{
-        mod => Mod,
-        func => Func,
-        args => pre_process_args(Mod, Func, maps:get(args, Action, #{}))
-    }.
+-export([ on_action_inspect/2
+        , on_action_republish/2
+        , on_action_do_nothing/2
+        ]).
 
-%%--------------------------------------------------------------------
-%% callbacks of emqx_rule_action
-%%--------------------------------------------------------------------
-pre_process_action_args(
-    republish,
-    #{
-        topic := Topic,
-        qos := QoS,
-        retain := Retain,
-        payload := Payload,
-        user_properties := UserProperties
-    } = Args
-) ->
-    Args#{
-        preprocessed_tmpl => #{
-            topic => emqx_plugin_libs_rule:preproc_tmpl(Topic),
-            qos => preproc_vars(QoS),
-            retain => preproc_vars(Retain),
-            payload => emqx_plugin_libs_rule:preproc_tmpl(Payload),
-            user_properties => preproc_user_properties(UserProperties)
-        }
-    };
-pre_process_action_args(_, Args) ->
-    Args.
+-spec(on_resource_create(binary(), map()) -> map()).
+on_resource_create(_Name, Conf) ->
+    Conf.
 
-%%--------------------------------------------------------------------
-%% action functions
-%%--------------------------------------------------------------------
--spec console(map(), map(), map()) -> any().
-console(Selected, #{metadata := #{rule_id := RuleId}} = Envs, _Args) ->
-    ?ULOG(
-        "[rule action] ~ts~n"
-        "\tAction Data: ~p~n"
-        "\tEnvs: ~p~n",
-        [RuleId, Selected, Envs]
-    ).
+%%------------------------------------------------------------------------------
+%% Action 'inspect'
+%%------------------------------------------------------------------------------
+-spec on_action_create_inspect(Id :: action_instance_id(), Params :: map()) -> {bindings(), NewParams :: map()}.
+on_action_create_inspect(Id, Params) ->
+    Params.
 
-republish(
-    _Selected,
-    #{
-        topic := Topic,
-        headers := #{republish_by := RuleId},
-        metadata := #{rule_id := RuleId}
-    },
-    _Args
-) ->
-    ?SLOG(error, #{msg => "recursive_republish_detected", topic => Topic});
-republish(
-    Selected,
-    #{metadata := #{rule_id := RuleId}} = Env,
-    #{
-        preprocessed_tmpl := #{
-            qos := QoSTks,
-            retain := RetainTks,
-            topic := TopicTks,
-            payload := PayloadTks,
-            user_properties := UserPropertiesTks
-        }
-    }
-) ->
-    Topic = emqx_plugin_libs_rule:proc_tmpl(TopicTks, Selected),
-    Payload = format_msg(PayloadTks, Selected),
-    QoS = replace_simple_var(QoSTks, Selected, 0),
-    Retain = replace_simple_var(RetainTks, Selected, false),
-    %% 'flags' is set for message re-publishes or message related
-    %% events such as message.acked and message.dropped
-    Flags0 = maps:get(flags, Env, #{}),
-    Flags = Flags0#{retain => Retain},
-    PubProps = format_pub_props(UserPropertiesTks, Selected, Env),
-    ?TRACE(
-        "RULE",
-        "republish_message",
-        #{
-            flags => Flags,
-            topic => Topic,
-            payload => Payload,
-            pub_props => PubProps
-        }
-    ),
-    safe_publish(RuleId, Topic, QoS, Flags, Payload, PubProps).
+-spec on_action_inspect(selected_data(), env_vars()) -> any().
+on_action_inspect(Selected, Envs) ->
+    io:format("[inspect]~n"
+              "\tSelected Data: ~p~n"
+              "\tEnvs: ~p~n"
+              "\tAction Init Params: ~p~n", [Selected, Envs, ?bound_v('Params', Envs)]),
+    emqx_rule_metrics:inc_actions_success(?bound_v('Id', Envs)).
 
-%%--------------------------------------------------------------------
-%% internal functions
-%%--------------------------------------------------------------------
-parse_action_func(ActionFunc) ->
-    {Mod, Func} = get_action_mod_func(ActionFunc),
-    assert_function_supported(Mod, Func),
-    {Mod, Func}.
 
-get_action_mod_func(ActionFunc) when is_atom(ActionFunc) ->
-    {emqx_rule_actions, ActionFunc};
-get_action_mod_func(ActionFunc) when is_binary(ActionFunc) ->
-    ToAtom = fun(Bin) ->
-        try binary_to_existing_atom(Bin) of
-            Atom -> Atom
-        catch
-            error:badarg -> error({unknown_action_function, ActionFunc})
-        end
-    end,
-    case string:split(ActionFunc, ":", all) of
-        [Func1] -> {emqx_rule_actions, ToAtom(Func1)};
-        [Mod1, Func1] -> {ToAtom(Mod1), ToAtom(Func1)};
-        _ -> error({invalid_action_function, ActionFunc})
-    end.
+%%------------------------------------------------------------------------------
+%% Action 'republish'
+%%------------------------------------------------------------------------------
+-spec on_action_create_republish(action_instance_id(), Params :: map()) -> {bindings(), NewParams :: map()}.
+on_action_create_republish(Id, Params = #{
+        <<"target_topic">> := TargetTopic,
+        <<"target_qos">> := TargetQoS,
+        <<"payload_tmpl">> := PayloadTmpl
+       }) ->
+    TopicTks = emqx_rule_utils:preproc_tmpl(TargetTopic),
+    PayloadTks = emqx_rule_utils:preproc_tmpl(PayloadTmpl),
+    Params.
 
-assert_function_supported(Mod, Func) ->
-    case erlang:function_exported(Mod, Func, 3) of
-        true -> ok;
-        false -> error({action_function_not_supported, Func})
-    end.
+-spec on_action_republish(selected_data(), env_vars()) -> any().
+on_action_republish(_Selected, Envs = #{
+            topic := Topic,
+            headers := #{republish_by := ActId},
+            ?BINDING_KEYS := #{'Id' := ActId}
+        }) ->
+    ?LOG(error, "[republish] recursively republish detected, msg topic: ~p, target topic: ~p",
+        [Topic, ?bound_v('TargetTopic', Envs)]),
+    emqx_rule_metrics:inc_actions_error(?bound_v('Id', Envs));
 
-pre_process_args(Mod, Func, Args) ->
-    case erlang:function_exported(Mod, pre_process_action_args, 2) of
-        true -> Mod:pre_process_action_args(Func, Args);
-        false -> Args
-    end.
+on_action_republish(Selected, _Envs = #{
+            qos := QoS, flags := Flags, timestamp := Timestamp,
+            ?BINDING_KEYS := #{
+                'Id' := ActId,
+                'TargetTopic' := TargetTopic,
+                'TargetQoS' := TargetQoS,
+                'TopicTks' := TopicTks,
+                'PayloadTks' := PayloadTks
+            }}) ->
+    ?LOG(debug, "[republish] republish to: ~p, Payload: ~p",
+        [TargetTopic, Selected]),
+    increase_and_publish(ActId,
+        #message{
+            id = emqx_guid:gen(),
+            qos = if TargetQoS =:= -1 -> QoS; true -> TargetQoS end,
+            from = ActId,
+            flags = Flags,
+            headers = #{republish_by => ActId},
+            topic = emqx_rule_utils:proc_tmpl(TopicTks, Selected),
+            payload = format_msg(PayloadTks, Selected),
+            timestamp = Timestamp
+        });
 
-safe_publish(RuleId, Topic, QoS, Flags, Payload, PubProps) ->
-    Msg = #message{
-        id = emqx_guid:gen(),
-        qos = QoS,
-        from = RuleId,
-        flags = Flags,
-        headers = #{
-            republish_by => RuleId,
-            properties => emqx_utils:pub_props_to_packet(PubProps)
-        },
-        topic = Topic,
-        payload = Payload,
-        timestamp = erlang:system_time(millisecond)
-    },
+%% in case this is not a "message.publish" request
+on_action_republish(Selected, _Envs = #{
+            ?BINDING_KEYS := #{
+                'Id' := ActId,
+                'TargetTopic' := TargetTopic,
+                'TargetQoS' := TargetQoS,
+                'TopicTks' := TopicTks,
+                'PayloadTks' := PayloadTks
+            }}) ->
+    ?LOG(debug, "[republish] republish to: ~p, Payload: ~p",
+        [TargetTopic, Selected]),
+    increase_and_publish(ActId,
+        #message{
+            id = emqx_guid:gen(),
+            qos = if TargetQoS =:= -1 -> 0; true -> TargetQoS end,
+            from = ActId,
+            flags = #{dup => false, retain => false},
+            headers = #{republish_by => ActId},
+            topic = emqx_rule_utils:proc_tmpl(TopicTks, Selected),
+            payload = format_msg(PayloadTks, Selected),
+            timestamp = erlang:system_time(millisecond)
+        }).
+
+increase_and_publish(ActId, Msg) ->
     _ = emqx_broker:safe_publish(Msg),
+    emqx_rule_metrics:inc_actions_success(ActId),
     emqx_metrics:inc_msg(Msg).
 
-preproc_vars(Data) when is_binary(Data) ->
-    emqx_plugin_libs_rule:preproc_tmpl(Data);
-preproc_vars(Data) ->
-    Data.
+-spec on_action_create_do_nothing(action_instance_id(), Params :: map()) -> {bindings(), NewParams :: map()}.
+on_action_create_do_nothing(ActId, Params) when is_binary(ActId) ->
+    Params.
 
-preproc_user_properties(<<"${pub_props.'User-Property'}">>) ->
-    %% keep the original
-    %% avoid processing this special variable because
-    %% we do not want to force users to select the value
-    %% the value will be taken from Env.pub_props directly
-    ?ORIGINAL_USER_PROPERTIES;
-preproc_user_properties(<<"${", _/binary>> = V) ->
-    %% use a variable
-    emqx_plugin_libs_rule:preproc_tmpl(V);
-preproc_user_properties(_) ->
-    %% invalid, discard
-    undefined.
+on_action_do_nothing(Selected, Envs) when is_map(Selected) ->
+    emqx_rule_metrics:inc_actions_success(?bound_v('ActId', Envs)).
 
-replace_simple_var(Tokens, Data, Default) when is_list(Tokens) ->
-    [Var] = emqx_plugin_libs_rule:proc_tmpl(Tokens, Data, #{return => rawlist}),
-    case Var of
-        %% cannot find the variable from Data
-        undefined -> Default;
-        _ -> Var
-    end;
-replace_simple_var(Val, _Data, _Default) ->
-    Val.
-
-format_msg([], Selected) ->
-    emqx_utils_json:encode(Selected);
-format_msg(Tokens, Selected) ->
-    emqx_plugin_libs_rule:proc_tmpl(Tokens, Selected).
-
-format_pub_props(UserPropertiesTks, Selected, Env) ->
-    UserProperties =
-        case UserPropertiesTks of
-            ?ORIGINAL_USER_PROPERTIES ->
-                maps:get('User-Property', maps:get(pub_props, Env, #{}), #{});
-            undefined ->
-                #{};
-            _ ->
-                replace_simple_var(UserPropertiesTks, Selected, #{})
-        end,
-    #{'User-Property' => UserProperties}.
+format_msg([], Data) ->
+    emqx_json:encode(Data);
+format_msg(Tokens, Data) ->
+     emqx_rule_utils:proc_tmpl(Tokens, Data).

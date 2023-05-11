@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,54 +18,19 @@
 
 -behaviour(supervisor).
 
--export([
-    start_link/0,
-    start_child/1,
-    stop_child/1
-]).
+-export([start_link/2]).
 
 -export([init/1]).
 
-%% Helper macro for declaring children of supervisor
--define(CHILD(Mod, Opts), #{
-    id => Mod,
-    start => {Mod, start_link, [Opts]},
-    restart => permanent,
-    shutdown => 5000,
-    type => worker,
-    modules => [Mod]
-}).
+start_link(PushGateway, Interval) ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, [PushGateway, Interval]).
 
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+init([PushGateway, Interval]) ->
+    {ok, {#{strategy => one_for_one, intensity => 10, period => 100},
+          [#{id       => emqx_prometheus,
+             start    => {emqx_prometheus, start_link, [PushGateway, Interval]},
+             restart  => permanent,
+             shutdown => 5000,
+             type     => worker,
+             modules  => [emqx_prometheus]}]}}.
 
--spec start_child(supervisor:child_spec() | atom()) -> ok.
-start_child(ChildSpec) when is_map(ChildSpec) ->
-    assert_started(supervisor:start_child(?MODULE, ChildSpec));
-start_child(Mod) when is_atom(Mod) ->
-    assert_started(supervisor:start_child(?MODULE, ?CHILD(Mod, []))).
-
--spec stop_child(any()) -> ok | {error, term()}.
-stop_child(ChildId) ->
-    case supervisor:terminate_child(?MODULE, ChildId) of
-        ok -> supervisor:delete_child(?MODULE, ChildId);
-        {error, not_found} -> ok;
-        Error -> Error
-    end.
-
-init([]) ->
-    Children =
-        case emqx_conf:get([prometheus, enable], false) of
-            false -> [];
-            true -> [?CHILD(emqx_prometheus, [])]
-        end,
-    {ok, {{one_for_one, 10, 3600}, Children}}.
-
-%%--------------------------------------------------------------------
-%% Internal functions
-%%--------------------------------------------------------------------
-
-assert_started({ok, _Pid}) -> ok;
-assert_started({ok, _Pid, _Info}) -> ok;
-assert_started({error, {already_started, _Pid}}) -> ok;
-assert_started({error, Reason}) -> {error, Reason}.

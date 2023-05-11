@@ -1,120 +1,63 @@
+$(shell $(CURDIR)/scripts/git-hooks-init.sh)
+REBAR_VERSION = 3.14.3-emqx-8
 REBAR = $(CURDIR)/rebar3
 BUILD = $(CURDIR)/build
 SCRIPTS = $(CURDIR)/scripts
 export EMQX_RELUP ?= true
-export EMQX_DEFAULT_BUILDER = ghcr.io/emqx/emqx-builder/5.0-28:1.13.4-24.3.4.2-2-debian11
-export EMQX_DEFAULT_RUNNER = debian:11-slim
-export EMQX_REL_FORM ?= tgz
-export QUICER_DOWNLOAD_FROM_RELEASE = 1
+export EMQX_EXTRA_PLUGINS = emqx_plugin_kafka
+export EMQX_DEFAULT_BUILDER = emqx/build-env:erl23.2.7.2-emqx-3-alpine
+export EMQX_DEFAULT_RUNNER = alpine:3.12
+export PKG_VSN ?= $(shell $(CURDIR)/pkg-vsn.sh)
+export EMQX_DESC ?= EMQ X
+export EMQX_CE_DASHBOARD_VERSION ?= v4.3.5
+export DOCKERFILE := deploy/docker/Dockerfile
 ifeq ($(OS),Windows_NT)
 	export REBAR_COLOR=none
-	FIND=/usr/bin/find
-else
-	FIND=find
-endif
-
-# Dashbord version
-# from https://github.com/emqx/emqx-dashboard5
-export EMQX_DASHBOARD_VERSION ?= v1.2.4
-export EMQX_EE_DASHBOARD_VERSION ?= e1.0.6
-
-# `:=` should be used here, otherwise the `$(shell ...)` will be executed every time when the variable is used
-# In make 4.4+, for backward-compatibility the value from the original environment is used.
-# so the shell script will be executed tons of times.
-# https://github.com/emqx/emqx/pull/10627
-ifeq ($(strip $(OTP_VSN)),)
-	export OTP_VSN := $(shell $(SCRIPTS)/get-otp-vsn.sh)
-endif
-ifeq ($(strip $(ELIXIR_VSN)),)
-	export ELIXIR_VSN := $(shell $(SCRIPTS)/get-elixir-vsn.sh)
 endif
 
 PROFILE ?= emqx
-REL_PROFILES := emqx emqx-enterprise
-PKG_PROFILES := emqx-pkg emqx-enterprise-pkg
+REL_PROFILES := emqx emqx-edge
+PKG_PROFILES := emqx-pkg emqx-edge-pkg
 PROFILES := $(REL_PROFILES) $(PKG_PROFILES) default
-
-CT_NODE_NAME ?= 'test@127.0.0.1'
-CT_READABLE ?= true
-CT_COVER_EXPORT_PREFIX ?= $(PROFILE)
 
 export REBAR_GIT_CLONE_OPTIONS += --depth=1
 
 .PHONY: default
 default: $(REBAR) $(PROFILE)
 
-.prepare:
-	@$(SCRIPTS)/git-hooks-init.sh # this is no longer needed since 5.0 but we keep it anyway
-	@$(SCRIPTS)/prepare-build-deps.sh
-	@touch .prepare
-
 .PHONY: all
 all: $(REBAR) $(PROFILES)
 
 .PHONY: ensure-rebar3
 ensure-rebar3:
-	@$(SCRIPTS)/ensure-rebar3.sh
+	@$(SCRIPTS)/fail-on-old-otp-version.escript
+	@$(SCRIPTS)/ensure-rebar3.sh $(REBAR_VERSION)
 
-$(REBAR): .prepare ensure-rebar3
+$(REBAR): ensure-rebar3
 
-.PHONY: ensure-hex
-ensure-hex:
-	@mix local.hex --if-missing --force
-
-.PHONY: ensure-mix-rebar3
-ensure-mix-rebar3: $(REBAR)
-	@mix local.rebar rebar3 $(CURDIR)/rebar3 --if-missing --force
-
-.PHONY: ensure-mix-rebar
-ensure-mix-rebar: $(REBAR)
-	@mix local.rebar --if-missing --force
-
-.PHONY: mix-deps-get
-mix-deps-get: $(ELIXIR_COMMON_DEPS)
-	@mix deps.get
+.PHONY: get-dashboard
+get-dashboard:
+	@$(SCRIPTS)/get-dashboard.sh
 
 .PHONY: eunit
-eunit: $(REBAR) merge-config
-	@ENABLE_COVER_COMPILE=1 $(REBAR) eunit -v -c --cover_export_name $(CT_COVER_EXPORT_PREFIX)-eunit
+eunit: $(REBAR)
+	@ENABLE_COVER_COMPILE=1 $(REBAR) eunit -v -c
 
 .PHONY: proper
 proper: $(REBAR)
 	@ENABLE_COVER_COMPILE=1 $(REBAR) proper -d test/props -c
 
-.PHONY: test-compile
-test-compile: $(REBAR) merge-config
-	$(REBAR) as test compile
-
-.PHONY: $(REL_PROFILES:%=%-compile)
-$(REL_PROFILES:%=%-compile): $(REBAR) merge-config
-	$(REBAR) as $(@:%-compile=%) compile
-
 .PHONY: ct
-ct: $(REBAR) merge-config
-	@ENABLE_COVER_COMPILE=1 $(REBAR) ct --name $(CT_NODE_NAME) -c -v --cover_export_name $(CT_COVER_EXPORT_PREFIX)-ct
+ct: $(REBAR)
+	@ENABLE_COVER_COMPILE=1 $(REBAR) ct --name 'test@127.0.0.1' -c -v
 
-## only check bpapi for enterprise profile because it's a super-set.
-.PHONY: static_checks
-static_checks:
-	@$(REBAR) as check do xref, dialyzer
-	@if [ "$${PROFILE}" = 'emqx-enterprise' ]; then $(REBAR) ct --suite apps/emqx/test/emqx_static_checks --readable $(CT_READABLE); fi
-	./scripts/check-i18n-style.sh
+APPS=$(shell $(CURDIR)/scripts/find-apps.sh)
 
-APPS=$(shell $(SCRIPTS)/find-apps.sh)
-
+## app/name-ct targets are intended for local tests hence cover is not enabled
 .PHONY: $(APPS:%=%-ct)
 define gen-app-ct-target
-$1-ct: $(REBAR) merge-config
-	$(eval SUITES := $(shell $(SCRIPTS)/find-suites.sh $1))
-ifneq ($(SUITES),)
-		@ENABLE_COVER_COMPILE=1 $(REBAR) ct -c -v \
-			--readable=$(CT_READABLE) \
-			--name $(CT_NODE_NAME) \
-			--cover_export_name $(CT_COVER_EXPORT_PREFIX)-$(subst /,-,$1) \
-			--suite $(SUITES)
-else
-		@echo 'No suites found for $1'
-endif
+$1-ct: $(REBAR)
+	$(REBAR) ct --name 'test@127.0.0.1' -v --suite $(shell $(CURDIR)/scripts/find-suites.sh $1)
 endef
 $(foreach app,$(APPS),$(eval $(call gen-app-ct-target,$(app))))
 
@@ -122,23 +65,9 @@ $(foreach app,$(APPS),$(eval $(call gen-app-ct-target,$(app))))
 .PHONY: $(APPS:%=%-prop)
 define gen-app-prop-target
 $1-prop:
-	$(REBAR) proper -d test/props -v -m $(shell $(SCRIPTS)/find-props.sh $1)
+	$(REBAR) proper -d test/props -v -m $(shell $(CURDIR)/scripts/find-props.sh $1)
 endef
 $(foreach app,$(APPS),$(eval $(call gen-app-prop-target,$(app))))
-
-.PHONY: ct-suite
-ct-suite: $(REBAR) merge-config
-ifneq ($(TESTCASE),)
-ifneq ($(GROUP),)
-	$(REBAR) ct -v --readable=$(CT_READABLE) --name $(CT_NODE_NAME) --suite $(SUITE)  --case $(TESTCASE) --group $(GROUP)
-else
-	$(REBAR) ct -v --readable=$(CT_READABLE) --name $(CT_NODE_NAME) --suite $(SUITE)  --case $(TESTCASE)
-endif
-else ifneq ($(GROUP),)
-	$(REBAR) ct -v --readable=$(CT_READABLE) --name $(CT_NODE_NAME) --suite $(SUITE)  --group $(GROUP)
-else
-	$(REBAR) ct -v --readable=$(CT_READABLE) --name $(CT_NODE_NAME) --suite $(SUITE)
-endif
 
 .PHONY: cover
 cover: $(REBAR)
@@ -148,16 +77,9 @@ cover: $(REBAR)
 coveralls: $(REBAR)
 	@ENABLE_COVER_COMPILE=1 $(REBAR) as test coveralls send
 
-COMMON_DEPS := $(REBAR)
-
 .PHONY: $(REL_PROFILES)
-$(REL_PROFILES:%=%): $(COMMON_DEPS)
-	@$(BUILD) $(@) rel
-
-.PHONY: compile $(PROFILES:%=compile-%)
-compile: $(PROFILES:%=compile-%)
-$(PROFILES:%=compile-%):
-	@$(BUILD) $(@:compile-%=%) apps
+$(REL_PROFILES:%=%): $(REBAR) get-dashboard
+	@$(REBAR) as $(@) do compile,release
 
 ## Not calling rebar3 clean because
 ## 1. rebar3 clean relies on rebar3, meaning it reads config, fetches dependencies etc.
@@ -168,16 +90,14 @@ $(PROFILES:%=compile-%):
 clean: $(PROFILES:%=clean-%)
 $(PROFILES:%=clean-%):
 	@if [ -d _build/$(@:clean-%=%) ]; then \
-		rm -f rebar.lock; \
+		rm rebar.lock \
 		rm -rf _build/$(@:clean-%=%)/rel; \
-		$(FIND) _build/$(@:clean-%=%) -name '*.beam' -o -name '*.so' -o -name '*.app' -o -name '*.appup' -o -name '*.o' -o -name '*.d' -type f | xargs rm -f; \
-		$(FIND) _build/$(@:clean-%=%) -type l -delete; \
+		find _build/$(@:clean-%=%) -name '*.beam' -o -name '*.so' -o -name '*.app' -o -name '*.appup' -o -name '*.o' -o -name '*.d' -type f | xargs rm -f; \
+		find _build/$(@:clean-%=%) -type l -delete; \
 	fi
 
 .PHONY: clean-all
 clean-all:
-	@rm -f rebar.lock
-	@rm -rf deps
 	@rm -rf _build
 
 .PHONY: deps-all
@@ -188,8 +108,7 @@ deps-all: $(REBAR) $(PROFILES:%=deps-%)
 ## share downloads between CI steps and/or copied into containers
 ## which may not have the right credentials
 .PHONY: $(PROFILES:%=deps-%)
-$(PROFILES:%=deps-%): $(COMMON_DEPS)
-	@$(SCRIPTS)/pre-compile.sh $(@:deps-%=%)
+$(PROFILES:%=deps-%): $(REBAR) get-dashboard
 	@$(REBAR) as $(@:deps-%=%) get-deps
 	@rm -f rebar.lock
 
@@ -201,6 +120,8 @@ xref: $(REBAR)
 dialyzer: $(REBAR)
 	@$(REBAR) as check dialyzer
 
+COMMON_DEPS := $(REBAR) get-dashboard $(CONF_SEGS)
+
 ## rel target is to create release package without relup
 .PHONY: $(REL_PROFILES:%=%-rel) $(PKG_PROFILES:%=%-rel)
 $(REL_PROFILES:%=%-rel) $(PKG_PROFILES:%=%-rel): $(COMMON_DEPS)
@@ -210,7 +131,7 @@ $(REL_PROFILES:%=%-rel) $(PKG_PROFILES:%=%-rel): $(COMMON_DEPS)
 .PHONY: $(REL_PROFILES:%=%-relup-downloads)
 define download-relup-packages
 $1-relup-downloads:
-	@if [ "$${EMQX_RELUP}" = "true" ]; then $(SCRIPTS)/relup-build/download-base-packages.sh $1; fi
+	@if [ "$${EMQX_RELUP}" = "true" ]; then $(CURDIR)/scripts/relup-base-packages.sh $1; fi
 endef
 ALL_ZIPS = $(REL_PROFILES)
 $(foreach zt,$(ALL_ZIPS),$(eval $(call download-relup-packages,$(zt))))
@@ -221,75 +142,38 @@ define gen-relup-target
 $1-relup: $1-relup-downloads $(COMMON_DEPS)
 	@$(BUILD) $1 relup
 endef
-ALL_TGZS = $(REL_PROFILES)
-$(foreach zt,$(ALL_TGZS),$(eval $(call gen-relup-target,$(zt))))
+ALL_ZIPS = $(REL_PROFILES)
+$(foreach zt,$(ALL_ZIPS),$(eval $(call gen-relup-target,$(zt))))
 
-## tgz target is to create a release package .tar.gz with relup
-.PHONY: $(REL_PROFILES:%=%-tgz)
-define gen-tgz-target
-$1-tgz: $1-relup
-	@$(BUILD) $1 tgz
+## zip target is to create a release package .zip with relup
+.PHONY: $(REL_PROFILES:%=%-zip)
+define gen-zip-target
+$1-zip: $1-relup
+	@$(BUILD) $1 zip
 endef
-ALL_TGZS = $(REL_PROFILES)
-$(foreach zt,$(ALL_TGZS),$(eval $(call gen-tgz-target,$(zt))))
+ALL_ZIPS = $(REL_PROFILES)
+$(foreach zt,$(ALL_ZIPS),$(eval $(call gen-zip-target,$(zt))))
 
 ## A pkg target depend on a regular release
 .PHONY: $(PKG_PROFILES)
 define gen-pkg-target
-$1: $(COMMON_DEPS)
+$1: $1-rel
 	@$(BUILD) $1 pkg
 endef
 $(foreach pt,$(PKG_PROFILES),$(eval $(call gen-pkg-target,$(pt))))
 
-.PHONY: run
-run: compile-$(PROFILE) quickrun
-
-.PHONY: quickrun
-quickrun:
-	./dev -p $(PROFILE)
-
-## Take the currently set PROFILE
-docker:
-	@$(BUILD) $(PROFILE) docker
-
 ## docker target is to create docker instructions
-.PHONY: $(REL_PROFILES:%=%-docker) $(REL_PROFILES:%=%-elixir-docker)
+.PHONY: $(REL_PROFILES:%=%-docker)
 define gen-docker-target
 $1-docker: $(COMMON_DEPS)
 	@$(BUILD) $1 docker
 endef
-ALL_DOCKERS = $(REL_PROFILES) $(REL_PROFILES:%=%-elixir)
-$(foreach zt,$(ALL_DOCKERS),$(eval $(call gen-docker-target,$(zt))))
+ALL_ZIPS = $(REL_PROFILES)
+$(foreach zt,$(ALL_ZIPS),$(eval $(call gen-docker-target,$(zt))))
 
-.PHONY:
-merge-config:
-	@$(SCRIPTS)/merge-config.escript
+.PHONY: run
+run: $(PROFILE) quickrun
 
-## elixir target is to create release packages using Elixir's Mix
-.PHONY: $(REL_PROFILES:%=%-elixir) $(PKG_PROFILES:%=%-elixir)
-$(REL_PROFILES:%=%-elixir) $(PKG_PROFILES:%=%-elixir): $(COMMON_DEPS)
-	@env IS_ELIXIR=yes $(BUILD) $(subst -elixir,,$(@)) elixir
-
-.PHONY: $(REL_PROFILES:%=%-elixir-pkg)
-define gen-elixir-pkg-target
-# the Elixir places the tar in a different path than Rebar3
-$1-elixir-pkg: $(COMMON_DEPS)
-	@env TAR_PKG_DIR=_build/$1-pkg \
-		IS_ELIXIR=yes \
-		$(BUILD) $1-pkg pkg
-endef
-$(foreach pt,$(REL_PROFILES),$(eval $(call gen-elixir-pkg-target,$(pt))))
-
-.PHONY: $(REL_PROFILES:%=%-elixir-tgz)
-define gen-elixir-tgz-target
-$1-elixir-tgz: $(COMMON_DEPS)
-	@env IS_ELIXIR=yes $(BUILD) $1 tgz
-endef
-ALL_ELIXIR_TGZS = $(REL_PROFILES)
-$(foreach tt,$(ALL_ELIXIR_TGZS),$(eval $(call gen-elixir-tgz-target,$(tt))))
-
-.PHONY: fmt
-fmt: $(REBAR)
-	@$(SCRIPTS)/erlfmt -w '{apps,lib-ee}/*/{src,include,test}/**/*.{erl,hrl,app.src}'
-	@$(SCRIPTS)/erlfmt -w 'rebar.config.erl'
-	@mix format
+.PHONY: quickrun
+quickrun:
+	./_build/$(PROFILE)/rel/emqx/bin/emqx console

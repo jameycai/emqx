@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,23 +18,18 @@
 
 -behaviour(application).
 
--define(APP, emqx_management).
+-emqx_plugin(?MODULE).
 
--export([
-    start/2,
-    stop/1
-]).
-
--include("emqx_mgmt.hrl").
+-export([ start/2
+        , stop/1
+        ]).
 
 start(_Type, _Args) ->
-    ok = mria_rlog:wait_for_shards([?MANAGEMENT_SHARD], infinity),
-    case emqx_mgmt_auth:init_bootstrap_file() of
-        ok ->
-            emqx_mgmt_sup:start_link();
-        {error, Reason} ->
-            {error, Reason}
-    end.
+    {ok, Sup} = emqx_mgmt_sup:start_link(),
+    _ = emqx_mgmt_auth:add_default_app(),
+    emqx_mgmt_http:start_listeners(),
+    emqx_mgmt_cli:load(),
+    {ok, Sup}.
 
 stop(_State) ->
-    ok.
+    emqx_mgmt_http:stop_listeners().

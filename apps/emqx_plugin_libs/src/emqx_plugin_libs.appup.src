@@ -1,13 +1,16 @@
-%% -*- mode: erlang -*-
+%% -*-: erlang -*-
+
 {VSN,
- [ {"4.3.0",
-    [ {add_module, emqx_plugin_libs_pool}
+  [
+    {<<"4.3.0">>, [
+      {load_module, emqx_plugin_libs_ssl, brutal_purge, soft_purge, []}
     ]},
-   {<<".*">>, []}
- ],
- [ {"4.3.0",
-    [ {delete_module, emqx_plugin_libs_pool}
+    {<<".*">>, []}
+  ],
+  [
+    {<<"4.3.0">>, [
+      {load_module, emqx_plugin_libs_ssl, brutal_purge, soft_purge, []}
     ]},
-   {<<".*">>, []}
- ]
+    {<<".*">>, []}
+  ]
 }.

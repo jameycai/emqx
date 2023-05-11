@@ -5,9 +5,14 @@
 -mode(compile).
 
 main([]) ->
+    AppsDir = case filelib:is_file("EMQX_ENTERPRISE") of
+                  true -> "lib-ee";
+                  false -> "lib-ce"
+              end,
+    true = filelib:is_dir(AppsDir),
     Files = ["rebar.config"] ++
             apps_rebar_config("apps") ++
-            apps_rebar_config("lib-ee"),
+            apps_rebar_config(AppsDir),
     Deps = collect_deps(Files, #{}),
     case count_bad_deps(Deps) of
         0 ->
@@ -36,9 +41,6 @@ collect_deps([File | Files], Acc) ->
     collect_deps(Files, do_collect_deps(Deps, File, Acc)).
 
 do_collect_deps([], _File, Acc) -> Acc;
-%% ignore relative app dependencies
-do_collect_deps([{_Name, {path, _Path}} | Deps], File, Acc) ->
-    do_collect_deps(Deps, File, Acc);
 do_collect_deps([{Name, Ref} | Deps], File, Acc) ->
     Refs = maps:get(Name, Acc, []),
     do_collect_deps(Deps, File, Acc#{Name => [{Ref, File} | Refs]}).
@@ -46,7 +48,7 @@ do_collect_deps([{Name, Ref} | Deps], File, Acc) ->
 count_bad_deps([]) -> 0;
 count_bad_deps([{Name, Refs0} | Rest]) ->
     Refs = lists:keysort(1, Refs0),
-    case is_unique_ref(Refs) andalso not_branch_ref(Refs) of
+    case is_unique_ref(Refs) of
         true ->
             count_bad_deps(Rest);
         false ->
@@ -59,7 +61,3 @@ is_unique_ref([{Ref, _File1}, {Ref, File2} | Rest]) ->
     is_unique_ref([{Ref, File2} | Rest]);
 is_unique_ref(_) ->
     false.
-
-not_branch_ref([]) -> true;
-not_branch_ref([{{git, _Repo, {branch, _Branch}}, _File} | _Rest]) -> false;
-not_branch_ref([_Ref | Rest]) -> not_branch_ref(Rest).

@@ -1,6 +1,5 @@
 apiVersion: v2
 name: emqx
-icon: https://github.com/emqx.png
 description: A Helm chart for EMQX
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -14,8 +13,8 @@ type: application
 
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
-version: 5.0.24
+version: 4.3.0
 
 # This is the version number of the application being deployed. This version number should be
 # incremented each time you make changes to the application.
-appVersion: 5.0.24
+appVersion: latest

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,28 +18,20 @@
 
 -behaviour(application).
 
--include("emqx_retainer.hrl").
+-emqx_plugin(?MODULE).
 
--export([
-    start/2,
-    stop/1
-]).
+-export([ start/2
+        , stop/1
+        ]).
 
 start(_Type, _Args) ->
-    ok = emqx_retainer_mnesia_cli:load(),
-    init_bucket(),
-    emqx_retainer_sup:start_link().
+    Env = application:get_all_env(emqx_retainer),
+    {ok, Sup} = emqx_retainer_sup:start_link(Env),
+    emqx_retainer:load(Env),
+    emqx_retainer_cli:load(),
+    {ok, Sup}.
 
 stop(_State) ->
-    ok = emqx_retainer_mnesia_cli:unload(),
-    delete_bucket(),
-    ok.
+    emqx_retainer_cli:unload(),
+    emqx_retainer:unload().
 
-init_bucket() ->
-    #{flow_control := FlowControl} = emqx:get_config([retainer]),
-    emqx_limiter_server:add_bucket(
-        ?APP, internal, maps:get(batch_deliver_limiter, FlowControl, undefined)
-    ).
-
-delete_bucket() ->
-    emqx_limiter_server:del_bucket(?APP, internal).

@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-elvis_version='1.1.0-emqx-2'
+elvis_version='1.0.0-emqx-2'
 
 base="${1:-}"
 repo="${2:-emqx/emqx}"
@@ -18,7 +18,7 @@ fi
 echo "elvis -v: $elvis_version"
 echo "git diff base: $base"
 
-if [ ! -f ./elvis ] || [ "$(./elvis -v | grep -oE '[1-9]+\.[0-9]+\.[0-9]+-emqx-[0-9]+')" != "$elvis_version" ]; then
+if [ ! -f ./elvis ] || [ "$(./elvis -v | grep -oE '[1-9]+\.[0-9]+\.[0-9]+\-emqx-[0-9]+')" != "$elvis_version" ]; then
     curl  --silent --show-error -fLO "https://github.com/emqx/elvis/releases/download/$elvis_version/elvis"
     chmod +x ./elvis
 fi
@@ -27,7 +27,6 @@ if [[ "$base" =~ [0-9a-f]{8,40} ]]; then
     # base is a commit sha1
     compare_base="$base"
 else
-    git remote -v
     remote="$(git remote -v | grep -E "github\.com(:|/)$REPO((\.git)|(\s))" | grep fetch | awk '{print $1}')"
     git fetch "$remote" "$base"
     compare_base="$remote/$base"
@@ -47,7 +46,6 @@ for file in $(git_diff); do
         # not .erl file
         continue
     fi
-    echo "$file ..."
     if ! ./elvis rock "$file" -c elvis.config; then
         bad_file_count=$(( bad_file_count + 1))
     fi
@@ -56,3 +54,31 @@ if [ $bad_file_count -gt 0 ]; then
     echo "elvis: $bad_file_count errors"
     exit 1
 fi
+
+### now check new-line at EOF for changed files
+
+nl_at_eof() {
+    local file="$1"
+    if ! [ -f "$file" ]; then
+        return
+    fi
+    case "$file" in
+        *.png|*rebar3)
+            return
+            ;;
+    esac
+    local lastbyte
+    lastbyte="$(tail -c 1 "$file" 2>&1)"
+    if [ "$lastbyte" != '' ]; then
+        echo "$file"
+        return 1
+    fi
+}
+
+for file in $(git_diff); do
+    if ! nl_at_eof "$file"; then
+        bad_file_count=$(( bad_file_count  + 1 ))
+    fi
+done
+
+exit $bad_file_count

@@ -2,7 +2,7 @@
 
 ## 动机
 
-在 EMQX v4.1-v4.2 中，我们发布了 2 个插件来扩展 emqx 的编程能力：
+在 EMQX Broker v4.1-v4.2 中，我们发布了 2 个插件来扩展 emqx 的编程能力：
 
 1. `emqx-extension-hook` 提供了使用 Java, Python 向 Broker 挂载钩子的功能
 2. `emqx-exproto` 提供了使用 Java，Python 编写用户自定义协议接入插件的功能
@@ -50,7 +50,7 @@
 ```protobuff
 syntax = "proto3";
 
-package emqx.exhook.v2;
+package emqx.exhook.v1;
 
 service HookProvider {
 
@@ -68,7 +68,7 @@ service HookProvider {
 
   rpc OnClientAuthenticate(ClientAuthenticateRequest) returns (ValuedResponse) {};
 
-  rpc OnClientAuthorize(ClientAuthorizeRequest) returns (ValuedResponse) {};
+  rpc OnClientCheckAcl(ClientCheckAclRequest) returns (ValuedResponse) {};
 
   rpc OnClientSubscribe(ClientSubscribeRequest) returns (EmptySuccess) {};
 
@@ -84,7 +84,7 @@ service HookProvider {
 
   rpc OnSessionDiscarded(SessionDiscardedRequest) returns (EmptySuccess) {};
 
-  rpc OnSessionTakenover(SessionTakenoverRequest) returns (EmptySuccess) {};
+  rpc OnSessionTakeovered(SessionTakeoveredRequest) returns (EmptySuccess) {};
 
   rpc OnSessionTerminated(SessionTerminatedRequest) returns (EmptySuccess) {};
 
@@ -101,12 +101,16 @@ service HookProvider {
 ### 配置文件示例
 
 ```
-exhook: {
-    ## 配置 gRPC 服务地址 (HTTP)
-    ##
-    ## default 为服务器的名称
-    server.default: {
-        url: "http://127.0.0.1:9000"
-    }
-}
+## 配置 gRPC 服务地址 (HTTP)
+##
+## s1 为服务器的名称
+exhook.server.s1.url = http://127.0.0.1:9001
+
+## 配置 gRPC 服务地址 (HTTPS)
+##
+## s2 为服务器名称
+exhook.server.s2.url = https://127.0.0.1:9002
+exhook.server.s2.cacertfile = ca.pem
+exhook.server.s2.certfile = cert.pem
+exhook.server.s2.keyfile = key.pem
 ```

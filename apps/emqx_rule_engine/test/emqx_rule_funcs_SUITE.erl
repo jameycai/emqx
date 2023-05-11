@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,21 +23,10 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
+-import(emqx_rule_events, [eventmsg_publish/1]).
+
 -define(PROPTEST(F), ?assert(proper:quickcheck(F()))).
 %%-define(PROPTEST(F), ?assert(proper:quickcheck(F(), [{on_output, fun ct:print/2}]))).
-
-init_per_suite(Config) ->
-    application:load(emqx_conf),
-    ConfigConf = <<"rule_engine {jq_function_default_timeout=10s}">>,
-    ok = emqx_common_test_helpers:load_config(emqx_rule_engine_schema, ConfigConf),
-    Config.
-
-end_per_suite(_Config) ->
-    ok.
-
-eventmsg_publish(Msg) ->
-    {Columns, _} = emqx_rule_events:eventmsg_publish(Msg),
-    Columns.
 
 %%------------------------------------------------------------------------------
 %% Test cases for IoT Funcs
@@ -46,9 +35,7 @@ eventmsg_publish(Msg) ->
 t_msgid(_) ->
     Msg = message(),
     ?assertEqual(undefined, apply_func(msgid, [], #{})),
-    ?assertEqual(
-        emqx_guid:to_hexstr(emqx_message:id(Msg)), apply_func(msgid, [], eventmsg_publish(Msg))
-    ).
+    ?assertEqual(emqx_guid:to_hexstr(emqx_message:id(Msg)), apply_func(msgid, [], eventmsg_publish(Msg))).
 
 t_qos(_) ->
     ?assertEqual(undefined, apply_func(qos, [], #{})),
@@ -74,12 +61,12 @@ t_clientid(_) ->
     ?assertEqual(<<"clientid">>, apply_func(clientid, [], Msg)).
 
 t_clientip(_) ->
-    Msg = emqx_message:set_header(peerhost, {127, 0, 0, 1}, message()),
+    Msg = emqx_message:set_header(peerhost, {127,0,0,1}, message()),
     ?assertEqual(undefined, apply_func(clientip, [], #{})),
     ?assertEqual(<<"127.0.0.1">>, apply_func(clientip, [], eventmsg_publish(Msg))).
 
 t_peerhost(_) ->
-    Msg = emqx_message:set_header(peerhost, {127, 0, 0, 1}, message()),
+    Msg = emqx_message:set_header(peerhost, {127,0,0,1}, message()),
     ?assertEqual(undefined, apply_func(peerhost, [], #{})),
     ?assertEqual(<<"127.0.0.1">>, apply_func(peerhost, [], eventmsg_publish(Msg))).
 
@@ -94,13 +81,13 @@ t_payload(_) ->
     ?assertEqual(c, apply_func(payload, [<<"a.b.c">>], Input#{payload => NestedMap})).
 
 %%------------------------------------------------------------------------------
-%% Data Type Conversion Funcs
+%% Data Type Convertion Funcs
 %%------------------------------------------------------------------------------
 t_str(_) ->
     ?assertEqual(<<"abc">>, emqx_rule_funcs:str("abc")),
     ?assertEqual(<<"abc">>, emqx_rule_funcs:str(abc)),
     ?assertEqual(<<"{\"a\":1}">>, emqx_rule_funcs:str(#{a => 1})),
-    ?assertEqual(<<"[{\"a\":1},{\"b\":1}]">>, emqx_rule_funcs:str([#{a => 1}, #{b => 1}])),
+    ?assertEqual(<<"[{\"a\":1},{\"b\":1}]">>, emqx_rule_funcs:str([#{a => 1},#{b => 1}])),
     ?assertEqual(<<"1">>, emqx_rule_funcs:str(1)),
     ?assertEqual(<<"2.0">>, emqx_rule_funcs:str(2.0)),
     ?assertEqual(<<"true">>, emqx_rule_funcs:str(true)),
@@ -110,9 +97,7 @@ t_str(_) ->
     ?assertEqual(<<"abc 你好"/utf8>>, emqx_rule_funcs:str_utf8("abc 你好")),
     ?assertEqual(<<"abc 你好"/utf8>>, emqx_rule_funcs:str_utf8(<<"abc 你好"/utf8>>)),
     ?assertEqual(<<"abc">>, emqx_rule_funcs:str_utf8(abc)),
-    ?assertEqual(
-        <<"{\"a\":\"abc 你好\"}"/utf8>>, emqx_rule_funcs:str_utf8(#{a => <<"abc 你好"/utf8>>})
-    ),
+    ?assertEqual(<<"{\"a\":\"abc 你好\"}"/utf8>>, emqx_rule_funcs:str_utf8(#{a => <<"abc 你好"/utf8>>})),
     ?assertEqual(<<"1">>, emqx_rule_funcs:str_utf8(1)),
     ?assertEqual(<<"2.0">>, emqx_rule_funcs:str_utf8(2.0)),
     ?assertEqual(<<"true">>, emqx_rule_funcs:str_utf8(true)),
@@ -141,9 +126,7 @@ t_float(_) ->
     ?assertError(_, emqx_rule_funcs:float("a")).
 
 t_map(_) ->
-    ?assertEqual(
-        #{ver => <<"1.0">>, name => "emqx"}, emqx_rule_funcs:map([{ver, <<"1.0">>}, {name, "emqx"}])
-    ),
+    ?assertEqual(#{ver => <<"1.0">>, name => "emqx"}, emqx_rule_funcs:map([{ver, <<"1.0">>}, {name, "emqx"}])),
     ?assertEqual(#{<<"a">> => 1}, emqx_rule_funcs:map(<<"{\"a\":1}">>)),
     ?assertError(_, emqx_rule_funcs:map(<<"a">>)),
     ?assertError(_, emqx_rule_funcs:map("a")),
@@ -168,51 +151,31 @@ t_proc_dict_put_get_del(_) ->
     ?assertEqual(undefined, emqx_rule_funcs:proc_dict_get(<<"abc">>)).
 
 t_term_encode(_) ->
-    TestData = [<<"abc">>, #{a => 1}, #{<<"3">> => [1, 2, 4]}],
-    lists:foreach(
-        fun(Data) ->
-            ?assertEqual(
-                Data,
+    TestData = [<<"abc">>, #{a => 1}, #{<<"3">> => [1,2,4]}],
+    lists:foreach(fun(Data) ->
+            ?assertEqual(Data,
                 emqx_rule_funcs:term_decode(
-                    emqx_rule_funcs:term_encode(Data)
-                )
-            )
-        end,
-        TestData
-    ).
-t_float2str(_) ->
-    ?assertEqual(<<"20.2">>, emqx_rule_funcs:float2str(20.2, 1)),
-    ?assertEqual(<<"20.2">>, emqx_rule_funcs:float2str(20.2, 10)),
-    ?assertEqual(<<"20.199999999999999">>, emqx_rule_funcs:float2str(20.2, 15)),
-    ?assertEqual(<<"20.1999999999999993">>, emqx_rule_funcs:float2str(20.2, 16)).
+                    emqx_rule_funcs:term_encode(Data)))
+        end, TestData).
 
 t_hexstr2bin(_) ->
-    ?assertEqual(<<6, 54, 79>>, emqx_rule_funcs:hexstr2bin(<<"6364f">>)),
-    ?assertEqual(<<10>>, emqx_rule_funcs:hexstr2bin(<<"a">>)),
-    ?assertEqual(<<15>>, emqx_rule_funcs:hexstr2bin(<<"f">>)),
-    ?assertEqual(<<5>>, emqx_rule_funcs:hexstr2bin(<<"5">>)),
-    ?assertEqual(<<1, 2>>, emqx_rule_funcs:hexstr2bin(<<"0102">>)),
-    ?assertEqual(<<17, 33>>, emqx_rule_funcs:hexstr2bin(<<"1121">>)).
+    ?assertEqual(<<1,2>>, emqx_rule_funcs:hexstr2bin(<<"0102">>)),
+    ?assertEqual(<<17,33>>, emqx_rule_funcs:hexstr2bin(<<"1121">>)).
 
 t_bin2hexstr(_) ->
-    ?assertEqual(<<"0102">>, emqx_rule_funcs:bin2hexstr(<<1, 2>>)),
-    ?assertEqual(<<"1121">>, emqx_rule_funcs:bin2hexstr(<<17, 33>>)).
+    ?assertEqual(<<"0102">>, emqx_rule_funcs:bin2hexstr(<<1,2>>)),
+    ?assertEqual(<<"1121">>, emqx_rule_funcs:bin2hexstr(<<17,33>>)).
 
 t_hex_convert(_) ->
     ?PROPTEST(hex_convert).
 
 hex_convert() ->
-    ?FORALL(
-        L,
-        list(range(0, 255)),
-        begin
-            AbitraryBin = list_to_binary(L),
-            AbitraryBin ==
-                emqx_rule_funcs:hexstr2bin(
-                    emqx_rule_funcs:bin2hexstr(AbitraryBin)
-                )
-        end
-    ).
+    ?FORALL(L, list(range(0, 255)),
+            begin
+                AbitraryBin = list_to_binary(L),
+                AbitraryBin == emqx_rule_funcs:hexstr2bin(
+                    emqx_rule_funcs:bin2hexstr(AbitraryBin))
+            end).
 
 t_is_null(_) ->
     ?assertEqual(true, emqx_rule_funcs:is_null(undefined)),
@@ -221,80 +184,50 @@ t_is_null(_) ->
     ?assertEqual(false, emqx_rule_funcs:is_null(<<"a">>)).
 
 t_is_not_null(_) ->
-    [
-        ?assertEqual(emqx_rule_funcs:is_not_null(T), not emqx_rule_funcs:is_null(T))
-     || T <- [undefined, a, <<"a">>, <<>>]
-    ].
+    [?assertEqual(emqx_rule_funcs:is_not_null(T), not emqx_rule_funcs:is_null(T))
+     || T <- [undefined, a, <<"a">>, <<>>]].
 
 t_is_str(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_str(T))
-     || T <- [<<"a">>, <<>>, <<"abc">>]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_str(T))
-     || T <- ["a", a, 1]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_str(T))
+     || T <- [<<"a">>, <<>>, <<"abc">>]],
+    [?assertEqual(false, emqx_rule_funcs:is_str(T))
+     || T <- ["a", a, 1]].
 
 t_is_bool(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_bool(T))
-     || T <- [true, false]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_bool(T))
-     || T <- ["a", <<>>, a, 2]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_bool(T))
+     || T <- [true, false]],
+    [?assertEqual(false, emqx_rule_funcs:is_bool(T))
+     || T <- ["a", <<>>, a, 2]].
 
 t_is_int(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_int(T))
-     || T <- [1, 2, -1]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_int(T))
-     || T <- [1.1, "a", a]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_int(T))
+     || T <- [1, 2, -1]],
+    [?assertEqual(false, emqx_rule_funcs:is_int(T))
+     || T <- [1.1, "a", a]].
 
 t_is_float(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_float(T))
-     || T <- [1.1, 2.0, -1.2]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_float(T))
-     || T <- [1, "a", a, <<>>]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_float(T))
+     || T <- [1.1, 2.0, -1.2]],
+    [?assertEqual(false, emqx_rule_funcs:is_float(T))
+     || T <- [1, "a", a, <<>>]].
 
 t_is_num(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_num(T))
-     || T <- [1.1, 2.0, -1.2, 1]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_num(T))
-     || T <- ["a", a, <<>>]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_num(T))
+     || T <- [1.1, 2.0, -1.2, 1]],
+    [?assertEqual(false, emqx_rule_funcs:is_num(T))
+     || T <- ["a", a, <<>>]].
 
 t_is_map(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_map(T))
-     || T <- [#{}, #{a => 1}]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_map(T))
-     || T <- ["a", a, <<>>]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_map(T))
+     || T <- [#{}, #{a =>1}]],
+    [?assertEqual(false, emqx_rule_funcs:is_map(T))
+     || T <- ["a", a, <<>>]].
 
 t_is_array(_) ->
-    [
-        ?assertEqual(true, emqx_rule_funcs:is_array(T))
-     || T <- [[], [1, 2]]
-    ],
-    [
-        ?assertEqual(false, emqx_rule_funcs:is_array(T))
-     || T <- [<<>>, a]
-    ].
+    [?assertEqual(true, emqx_rule_funcs:is_array(T))
+     || T <- [[], [1,2]]],
+    [?assertEqual(false, emqx_rule_funcs:is_array(T))
+     || T <- [<<>>, a]].
 
 %%------------------------------------------------------------------------------
 %% Test cases for arith op
@@ -304,30 +237,22 @@ t_arith_op(_) ->
     ?PROPTEST(prop_arith_op).
 
 prop_arith_op() ->
-    ?FORALL(
-        {X, Y},
-        {number(), number()},
-        begin
-            (X + Y) == apply_func('+', [X, Y]) andalso
+    ?FORALL({X, Y}, {number(), number()},
+            begin
+                (X + Y) == apply_func('+', [X, Y]) andalso
                 (X - Y) == apply_func('-', [X, Y]) andalso
                 (X * Y) == apply_func('*', [X, Y]) andalso
-                (if
-                    Y =/= 0 ->
+                (if Y =/= 0 ->
                         (X / Y) == apply_func('/', [X, Y]);
-                    true ->
-                        true
-                end) andalso
-                (case
-                    is_integer(X) andalso
-                        is_pos_integer(Y)
-                of
-                    true ->
-                        (X rem Y) == apply_func('mod', [X, Y]);
-                    false ->
-                        true
+                    true -> true
+                 end) andalso
+                (case is_integer(X)
+                     andalso is_pos_integer(Y) of
+                     true ->
+                         (X rem Y) == apply_func('mod', [X, Y]);
+                     false -> true
                 end)
-        end
-    ).
+            end).
 
 is_pos_integer(X) ->
     is_integer(X) andalso X > 0.
@@ -341,45 +266,29 @@ t_math_fun(_) ->
 
 prop_math_fun() ->
     Excluded = [module_info, atanh, asin, acos],
-    MathFuns = [
-        {F, A}
-     || {F, A} <- math:module_info(exports),
-        not lists:member(F, Excluded),
-        erlang:function_exported(emqx_rule_funcs, F, A)
-    ],
-    ?FORALL(
-        {X, Y},
-        {pos_integer(), pos_integer()},
-        begin
-            lists:foldl(
-                fun
-                    ({F, 1}, True) ->
-                        True andalso comp_with_math(F, X);
-                    ({F = fmod, 2}, True) ->
-                        True andalso
-                            (if
-                                Y =/= 0 ->
-                                    comp_with_math(F, X, Y);
-                                true ->
-                                    true
-                            end);
-                    ({F, 2}, True) ->
-                        True andalso comp_with_math(F, X, Y)
-                end,
-                true,
-                MathFuns
-            )
-        end
-    ).
+    MathFuns = [{F, A} || {F, A} <- math:module_info(exports),
+                          not lists:member(F, Excluded),
+                          erlang:function_exported(emqx_rule_funcs, F, A)],
+    ?FORALL({X, Y}, {pos_integer(), pos_integer()},
+            begin
+                lists:foldl(fun({F, 1}, True) ->
+                                    True andalso comp_with_math(F, X);
+                               ({F = fmod, 2}, True) ->
+                                    True andalso (if Y =/= 0 ->
+                                                         comp_with_math(F, X, Y);
+                                                     true -> true
+                                                  end);
+                               ({F, 2}, True) ->
+                                    True andalso comp_with_math(F, X, Y)
+                            end, true, MathFuns)
+            end).
 
-comp_with_math(Fun, X) when
-    Fun =:= exp;
-    Fun =:= sinh;
-    Fun =:= cosh
-->
-    if
-        X < 710 -> math:Fun(X) == apply_func(Fun, [X]);
-        true -> true
+comp_with_math(Fun, X)
+        when Fun =:= exp;
+             Fun =:= sinh;
+             Fun =:= cosh ->
+    if X < 710 -> math:Fun(X) == apply_func(Fun, [X]);
+       true -> true
     end;
 comp_with_math(F, X) ->
     math:F(X) == apply_func(F, [X]).
@@ -395,18 +304,15 @@ t_bits_op(_) ->
     ?PROPTEST(prop_bits_op).
 
 prop_bits_op() ->
-    ?FORALL(
-        {X, Y},
-        {integer(), integer()},
-        begin
-            (bnot X) == apply_func(bitnot, [X]) andalso
+    ?FORALL({X, Y}, {integer(), integer()},
+            begin
+                (bnot X) == apply_func(bitnot, [X]) andalso
                 (X band Y) == apply_func(bitand, [X, Y]) andalso
                 (X bor Y) == apply_func(bitor, [X, Y]) andalso
                 (X bxor Y) == apply_func(bitxor, [X, Y]) andalso
                 (X bsl Y) == apply_func(bitsl, [X, Y]) andalso
                 (X bsr Y) == apply_func(bitsr, [X, Y])
-        end
-    ).
+            end).
 
 %%------------------------------------------------------------------------------
 %% Test cases for string
@@ -440,154 +346,86 @@ t_trim(_) ->
 t_split_all(_) ->
     ?assertEqual([], apply_func(split, [<<>>, <<"/">>])),
     ?assertEqual([], apply_func(split, [<<"/">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(split, [<<"/a/b//c/">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(split, [<<"a,b,c">>, <<",">>])),
-    ?assertEqual([<<"a">>, <<" b ">>, <<"c">>], apply_func(split, [<<"a, b ,c">>, <<",">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c\r\n">>], apply_func(split, [<<"a,b,c\r\n">>, <<",">>])).
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(split, [<<"/a/b//c/">>, <<"/">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(split, [<<"a,b,c">>, <<",">>])),
+    ?assertEqual([<<"a">>,<<" b ">>,<<"c">>], apply_func(split, [<<"a, b ,c">>, <<",">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c\r\n">>], apply_func(split, [<<"a,b,c\r\n">>, <<",">>])).
 
 t_split_notrim_all(_) ->
     ?assertEqual([<<>>], apply_func(split, [<<>>, <<"/">>, <<"notrim">>])),
-    ?assertEqual([<<>>, <<>>], apply_func(split, [<<"/">>, <<"/">>, <<"notrim">>])),
-    ?assertEqual(
-        [<<>>, <<"a">>, <<"b">>, <<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"notrim">>])
-    ),
-    ?assertEqual(
-        [<<>>, <<"a">>, <<"b">>, <<>>, <<"c">>, <<>>],
-        apply_func(split, [<<"/a/b//c/">>, <<"/">>, <<"notrim">>])
-    ),
-    ?assertEqual(
-        [<<>>, <<"a">>, <<"b">>, <<"c\n">>],
-        apply_func(split, [<<",a,b,c\n">>, <<",">>, <<"notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<" b">>, <<"c\r\n">>],
-        apply_func(split, [<<"a, b,c\r\n">>, <<",">>, <<"notrim">>])
-    ),
-    ?assertEqual(
-        [<<"哈哈"/utf8>>, <<" 你好"/utf8>>, <<" 是的\r\n"/utf8>>],
-        apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"notrim">>])
-    ).
+    ?assertEqual([<<>>,<<>>], apply_func(split, [<<"/">>, <<"/">>, <<"notrim">>])),
+    ?assertEqual([<<>>, <<"a">>,<<"b">>,<<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"notrim">>])),
+    ?assertEqual([<<>>, <<"a">>,<<"b">>, <<>>, <<"c">>, <<>>], apply_func(split, [<<"/a/b//c/">>, <<"/">>, <<"notrim">>])),
+    ?assertEqual([<<>>, <<"a">>,<<"b">>,<<"c\n">>], apply_func(split, [<<",a,b,c\n">>, <<",">>, <<"notrim">>])),
+    ?assertEqual([<<"a">>,<<" b">>,<<"c\r\n">>], apply_func(split, [<<"a, b,c\r\n">>, <<",">>, <<"notrim">>])),
+    ?assertEqual([<<"哈哈"/utf8>>,<<" 你好"/utf8>>,<<" 是的\r\n"/utf8>>], apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"notrim">>])).
 
 t_split_leading(_) ->
     ?assertEqual([], apply_func(split, [<<>>, <<"/">>, <<"leading">>])),
     ?assertEqual([], apply_func(split, [<<"/">>, <<"/">>, <<"leading">>])),
     ?assertEqual([<<"a/b/c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"leading">>])),
-    ?assertEqual(
-        [<<"a">>, <<"b//c/">>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"leading">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<"b,c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"leading">>])
-    ),
-    ?assertEqual(
-        [<<"a b">>, <<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"leading">>])
-    ),
-    ?assertEqual(
-        [<<"哈哈"/utf8>>, <<" 你好, 是的\r\n"/utf8>>],
-        apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"leading">>])
-    ).
+    ?assertEqual([<<"a">>,<<"b//c/">>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"leading">>])),
+    ?assertEqual([<<"a">>,<<"b,c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"leading">>])),
+    ?assertEqual([<<"a b">>,<<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"leading">>])),
+    ?assertEqual([<<"哈哈"/utf8>>,<<" 你好, 是的\r\n"/utf8>>], apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"leading">>])).
 
 t_split_leading_notrim(_) ->
     ?assertEqual([<<>>], apply_func(split, [<<>>, <<"/">>, <<"leading_notrim">>])),
-    ?assertEqual([<<>>, <<>>], apply_func(split, [<<"/">>, <<"/">>, <<"leading_notrim">>])),
-    ?assertEqual(
-        [<<>>, <<"a/b/c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"leading_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<"b//c/">>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"leading_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<"b,c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"leading_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a b">>, <<"c\r\n">>],
-        apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"leading_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"哈哈"/utf8>>, <<" 你好, 是的\r\n"/utf8>>],
-        apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"leading_notrim">>])
-    ).
+    ?assertEqual([<<>>,<<>>], apply_func(split, [<<"/">>, <<"/">>, <<"leading_notrim">>])),
+    ?assertEqual([<<>>, <<"a/b/c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"leading_notrim">>])),
+    ?assertEqual([<<"a">>,<<"b//c/">>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"leading_notrim">>])),
+    ?assertEqual([<<"a">>,<<"b,c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"leading_notrim">>])),
+    ?assertEqual([<<"a b">>,<<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"leading_notrim">>])),
+    ?assertEqual([<<"哈哈"/utf8>>,<<" 你好, 是的\r\n"/utf8>>], apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"leading_notrim">>])).
 
 t_split_trailing(_) ->
     ?assertEqual([], apply_func(split, [<<>>, <<"/">>, <<"trailing">>])),
     ?assertEqual([], apply_func(split, [<<"/">>, <<"/">>, <<"trailing">>])),
     ?assertEqual([<<"/a/b">>, <<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"trailing">>])),
     ?assertEqual([<<"a/b//c">>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"trailing">>])),
-    ?assertEqual(
-        [<<"a,b">>, <<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"trailing">>])
-    ),
-    ?assertEqual(
-        [<<"a b">>, <<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"trailing">>])
-    ),
-    ?assertEqual(
-        [<<"哈哈, 你好"/utf8>>, <<" 是的\r\n"/utf8>>],
-        apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"trailing">>])
-    ).
+    ?assertEqual([<<"a,b">>,<<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"trailing">>])),
+    ?assertEqual([<<"a b">>,<<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"trailing">>])),
+    ?assertEqual([<<"哈哈, 你好"/utf8>>,<<" 是的\r\n"/utf8>>], apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"trailing">>])).
 
 t_split_trailing_notrim(_) ->
     ?assertEqual([<<>>], apply_func(split, [<<>>, <<"/">>, <<"trailing_notrim">>])),
     ?assertEqual([<<>>, <<>>], apply_func(split, [<<"/">>, <<"/">>, <<"trailing_notrim">>])),
-    ?assertEqual(
-        [<<"/a/b">>, <<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"trailing_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a/b//c">>, <<>>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"trailing_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a,b">>, <<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"trailing_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"a b">>, <<"c\r\n">>],
-        apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"trailing_notrim">>])
-    ),
-    ?assertEqual(
-        [<<"哈哈, 你好"/utf8>>, <<" 是的\r\n"/utf8>>],
-        apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"trailing_notrim">>])
-    ).
+    ?assertEqual([<<"/a/b">>, <<"c">>], apply_func(split, [<<"/a/b/c">>, <<"/">>, <<"trailing_notrim">>])),
+    ?assertEqual([<<"a/b//c">>, <<>>], apply_func(split, [<<"a/b//c/">>, <<"/">>, <<"trailing_notrim">>])),
+    ?assertEqual([<<"a,b">>,<<"c\n">>], apply_func(split, [<<"a,b,c\n">>, <<",">>, <<"trailing_notrim">>])),
+    ?assertEqual([<<"a b">>,<<"c\r\n">>], apply_func(split, [<<"a b,c\r\n">>, <<",">>, <<"trailing_notrim">>])),
+    ?assertEqual([<<"哈哈, 你好"/utf8>>,<<" 是的\r\n"/utf8>>], apply_func(split, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<",">>, <<"trailing_notrim">>])).
 
 t_tokens(_) ->
     ?assertEqual([], apply_func(tokens, [<<>>, <<"/">>])),
     ?assertEqual([], apply_func(tokens, [<<"/">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<"/a/b/c">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<"/a/b//c/">>, <<"/">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<" /a/ b /c">>, <<" /">>])),
-    ?assertEqual([<<"a">>, <<"\nb">>, <<"c\n">>], apply_func(tokens, [<<"a ,\nb,c\n">>, <<", ">>])),
-    ?assertEqual([<<"a">>, <<"b">>, <<"c\r\n">>], apply_func(tokens, [<<"a ,b,c\r\n">>, <<", ">>])),
-    ?assertEqual(
-        [<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<"a,b, c\n">>, <<", ">>, <<"nocrlf">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<"a,b,c\r\n">>, <<",">>, <<"nocrlf">>])
-    ),
-    ?assertEqual(
-        [<<"a">>, <<"b">>, <<"c">>], apply_func(tokens, [<<"a,b\r\n,c\n">>, <<",">>, <<"nocrlf">>])
-    ),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<"/a/b/c">>, <<"/">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<"/a/b//c/">>, <<"/">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<" /a/ b /c">>, <<" /">>])),
+    ?assertEqual([<<"a">>,<<"\nb">>,<<"c\n">>], apply_func(tokens, [<<"a ,\nb,c\n">>, <<", ">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c\r\n">>], apply_func(tokens, [<<"a ,b,c\r\n">>, <<", ">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<"a,b, c\n">>, <<", ">>, <<"nocrlf">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<"a,b,c\r\n">>, <<",">>, <<"nocrlf">>])),
+    ?assertEqual([<<"a">>,<<"b">>,<<"c">>], apply_func(tokens, [<<"a,b\r\n,c\n">>, <<",">>, <<"nocrlf">>])),
     ?assertEqual([], apply_func(tokens, [<<"\r\n">>, <<",">>, <<"nocrlf">>])),
     ?assertEqual([], apply_func(tokens, [<<"\r\n">>, <<",">>, <<"nocrlf">>])),
-    ?assertEqual(
-        [<<"哈哈"/utf8>>, <<"你好"/utf8>>, <<"是的"/utf8>>],
-        apply_func(tokens, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<", ">>, <<"nocrlf">>])
-    ).
+    ?assertEqual([<<"哈哈"/utf8>>,<<"你好"/utf8>>,<<"是的"/utf8>>], apply_func(tokens, [<<"哈哈, 你好, 是的\r\n"/utf8>>, <<", ">>, <<"nocrlf">>])).
 
 t_concat(_) ->
     ?assertEqual(<<"ab">>, apply_func(concat, [<<"a">>, <<"b">>])),
     ?assertEqual(<<"ab">>, apply_func('+', [<<"a">>, <<"b">>])),
-    ?assertEqual(<<"哈哈你好"/utf8>>, apply_func(concat, [<<"哈哈"/utf8>>, <<"你好"/utf8>>])),
+    ?assertEqual(<<"哈哈你好"/utf8>>, apply_func(concat, [<<"哈哈"/utf8>>,<<"你好"/utf8>>])),
     ?assertEqual(<<"abc">>, apply_func(concat, [apply_func(concat, [<<"a">>, <<"b">>]), <<"c">>])),
     ?assertEqual(<<"a">>, apply_func(concat, [<<"">>, <<"a">>])),
     ?assertEqual(<<"a">>, apply_func(concat, [<<"a">>, <<"">>])),
     ?assertEqual(<<>>, apply_func(concat, [<<"">>, <<"">>])).
 
 t_sprintf(_) ->
-    ?assertEqual(<<"Hello Shawn!">>, apply_func(sprintf, [<<"Hello ~ts!">>, <<"Shawn">>])),
-    ?assertEqual(
-        <<"Name: ABC, Count: 2">>, apply_func(sprintf, [<<"Name: ~ts, Count: ~p">>, <<"ABC">>, 2])
-    ),
-    ?assertEqual(
-        <<"Name: ABC, Count: 2, Status: {ok,running}">>,
-        apply_func(sprintf, [<<"Name: ~ts, Count: ~p, Status: ~p">>, <<"ABC">>, 2, {ok, running}])
-    ).
+    ?assertEqual(<<"Hello Shawn!">>, apply_func(sprintf, [<<"Hello ~s!">>, <<"Shawn">>])),
+    ?assertEqual(<<"Name: ABC, Count: 2">>, apply_func(sprintf, [<<"Name: ~s, Count: ~p">>, <<"ABC">>, 2])),
+    ?assertEqual(<<"Name: ABC, Count: 2, Status: {ok,running}">>, apply_func(sprintf, [<<"Name: ~s, Count: ~p, Status: ~p">>, <<"ABC">>, 2, {ok, running}])).
 
 t_pad(_) ->
     ?assertEqual(<<"abc  ">>, apply_func(pad, [<<"abc">>, 5])),
@@ -611,12 +449,8 @@ t_replace(_) ->
     ?assertEqual(<<"ab-c--">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>])),
     ?assertEqual(<<"ab::c::::">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"::">>])),
     ?assertEqual(<<"ab-c--">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>, <<"all">>])),
-    ?assertEqual(
-        <<"ab-c  ">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>, <<"leading">>])
-    ),
-    ?assertEqual(
-        <<"ab c -">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>, <<"trailing">>])
-    ).
+    ?assertEqual(<<"ab-c  ">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>, <<"leading">>])),
+    ?assertEqual(<<"ab c -">>, apply_func(replace, [<<"ab c  ">>, <<" ">>, <<"-">>, <<"trailing">>])).
 
 t_ascii(_) ->
     ?assertEqual(97, apply_func(ascii, [<<"a">>])),
@@ -649,49 +483,7 @@ t_regex_replace(_) ->
     ?assertEqual(<<"aebed">>, apply_func(regex_replace, [<<"accbcd">>, <<"c+">>, <<"e">>])),
     ?assertEqual(<<"a[cc]b[c]d">>, apply_func(regex_replace, [<<"accbcd">>, <<"c+">>, <<"[&]">>])).
 
-jq_1_elm_res(JSONString) ->
-    Bin = list_to_binary(JSONString),
-    [apply_func(json_decode, [Bin])].
-
-t_jq(_) ->
-    ?assertEqual(
-        jq_1_elm_res("{\"b\":2}"),
-        apply_func(jq, [<<".">>, apply_func(json_decode, [<<"{\"b\": 2}">>])])
-    ),
-    ?assertEqual(
-        jq_1_elm_res("6"),
-        apply_func(jq, [<<".+1">>, apply_func(json_decode, [<<"5">>])])
-    ),
-    ?assertEqual(
-        jq_1_elm_res("{\"b\":2}"),
-        apply_func(jq, [<<".">>, <<"{\"b\": 2}">>])
-    ),
-    %% Expicitly set timeout
-    ?assertEqual(
-        jq_1_elm_res("{\"b\":2}"),
-        apply_func(jq, [<<".">>, <<"{\"b\": 2}">>, 10000])
-    ),
-    TOProgram = erlang:iolist_to_binary(
-        "def while(cond; update):"
-        "  def _while:"
-        "    if cond then  (update | _while) else . end;"
-        "  _while;"
-        "while(. < 42; . * 2)"
-    ),
-    got_timeout =
-        try
-            apply_func(jq, [TOProgram, <<"-2">>, 10])
-        catch
-            throw:{jq_exception, {timeout, _}} ->
-                %% Got timeout as expected
-                got_timeout
-        end,
-    ?assertThrow(
-        {jq_exception, {timeout, _}},
-        apply_func(jq, [TOProgram, <<"-2">>])
-    ).
-
-ascii_string() -> list(range(0, 127)).
+ascii_string() -> list(range(0,127)).
 
 bin(S) -> iolist_to_binary(S).
 
@@ -700,34 +492,34 @@ bin(S) -> iolist_to_binary(S).
 %%------------------------------------------------------------------------------
 
 t_nth(_) ->
-    ?assertEqual(2, apply_func(nth, [2, [1, 2, 3, 4]])),
-    ?assertEqual(4, apply_func(nth, [4, [1, 2, 3, 4]])).
+    ?assertEqual(2, apply_func(nth, [2, [1,2,3,4]])),
+    ?assertEqual(4, apply_func(nth, [4, [1,2,3,4]])).
 
 t_length(_) ->
-    ?assertEqual(4, apply_func(length, [[1, 2, 3, 4]])),
+    ?assertEqual(4, apply_func(length, [[1,2,3,4]])),
     ?assertEqual(0, apply_func(length, [[]])).
 
 t_slice(_) ->
-    ?assertEqual([1, 2, 3, 4], apply_func(sublist, [4, [1, 2, 3, 4]])),
-    ?assertEqual([1, 2], apply_func(sublist, [2, [1, 2, 3, 4]])),
-    ?assertEqual([4], apply_func(sublist, [4, 1, [1, 2, 3, 4]])),
-    ?assertEqual([4], apply_func(sublist, [4, 2, [1, 2, 3, 4]])),
-    ?assertEqual([], apply_func(sublist, [5, 2, [1, 2, 3, 4]])),
-    ?assertEqual([2, 3], apply_func(sublist, [2, 2, [1, 2, 3, 4]])),
-    ?assertEqual([1], apply_func(sublist, [1, 1, [1, 2, 3, 4]])).
+    ?assertEqual([1,2,3,4], apply_func(sublist, [4, [1,2,3,4]])),
+    ?assertEqual([1,2], apply_func(sublist, [2, [1,2,3,4]])),
+    ?assertEqual([4], apply_func(sublist, [4, 1, [1,2,3,4]])),
+    ?assertEqual([4], apply_func(sublist, [4, 2, [1,2,3,4]])),
+    ?assertEqual([], apply_func(sublist, [5, 2, [1,2,3,4]])),
+    ?assertEqual([2,3], apply_func(sublist, [2, 2, [1,2,3,4]])),
+    ?assertEqual([1], apply_func(sublist, [1, 1, [1,2,3,4]])).
 
 t_first_last(_) ->
-    ?assertEqual(1, apply_func(first, [[1, 2, 3, 4]])),
-    ?assertEqual(4, apply_func(last, [[1, 2, 3, 4]])).
+    ?assertEqual(1, apply_func(first, [[1,2,3,4]])),
+    ?assertEqual(4, apply_func(last, [[1,2,3,4]])).
 
 t_contains(_) ->
-    ?assertEqual(true, apply_func(contains, [1, [1, 2, 3, 4]])),
-    ?assertEqual(true, apply_func(contains, [3, [1, 2, 3, 4]])),
-    ?assertEqual(true, apply_func(contains, [<<"a">>, [<<>>, <<"ab">>, 3, <<"a">>]])),
-    ?assertEqual(true, apply_func(contains, [#{a => b}, [#{a => 1}, #{a => b}]])),
-    ?assertEqual(false, apply_func(contains, [#{a => b}, [#{a => 1}]])),
+    ?assertEqual(true, apply_func(contains, [1, [1,2,3,4]])),
+    ?assertEqual(true, apply_func(contains, [3, [1,2,3,4]])),
+    ?assertEqual(true, apply_func(contains, [<<"a">>, [<<>>,<<"ab">>,3,<<"a">>]])),
+    ?assertEqual(true, apply_func(contains, [#{a=>b}, [#{a=>1}, #{a=>b}]])),
+    ?assertEqual(false, apply_func(contains, [#{a=>b}, [#{a=>1}]])),
     ?assertEqual(false, apply_func(contains, [3, [1, 2]])),
-    ?assertEqual(false, apply_func(contains, [<<"c">>, [<<>>, <<"ab">>, 3, <<"a">>]])).
+    ?assertEqual(false, apply_func(contains, [<<"c">>, [<<>>,<<"ab">>,3,<<"a">>]])).
 
 t_map_get(_) ->
     ?assertEqual(1, apply_func(map_get, [<<"a">>, #{a => 1}])),
@@ -740,9 +532,7 @@ t_map_put(_) ->
     ?assertEqual(#{<<"a">> => 1}, apply_func(map_put, [<<"a">>, 1, #{}])),
     ?assertEqual(#{a => 2}, apply_func(map_put, [<<"a">>, 2, #{a => 1}])),
     ?assertEqual(#{<<"a">> => #{<<"b">> => 1}}, apply_func(map_put, [<<"a.b">>, 1, #{}])),
-    ?assertEqual(
-        #{a => #{b => 1, <<"c">> => 1}}, apply_func(map_put, [<<"a.c">>, 1, #{a => #{b => 1}}])
-    ),
+    ?assertEqual(#{a => #{b => 1, <<"c">> => 1}}, apply_func(map_put, [<<"a.c">>, 1, #{a => #{b => 1}}])),
     ?assertEqual(#{a => 2}, apply_func(map_put, [<<"a">>, 2, #{a => 1}])).
 
 t_mget(_) ->
@@ -789,26 +579,20 @@ t_subbits2_1(_) ->
     ?assertEqual(127, apply_func(subbits, [<<255:8>>, 2, 7])),
     ?assertEqual(127, apply_func(subbits, [<<255:8>>, 2, 8])).
 t_subbits2_integer(_) ->
-    ?assertEqual(
-        456,
-        apply_func(subbits, [<<456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])
-    ),
-    ?assertEqual(
-        -456,
-        apply_func(subbits, [<<-456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])
-    ).
+    ?assertEqual(456, apply_func(subbits, [<<456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])),
+    ?assertEqual(-456, apply_func(subbits, [<<-456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])).
 
 t_subbits2_float(_) ->
     R = apply_func(subbits, [<<5.3:64/float>>, 1, 64, <<"float">>, <<"unsigned">>, <<"big">>]),
     RL = (5.3 - R),
     ct:pal(";;;;~p", [R]),
-    ?assert((RL >= 0 andalso RL < 0.0001) orelse (RL =< 0 andalso RL > -0.0001)),
+    ?assert( (RL >= 0 andalso RL < 0.0001) orelse (RL =< 0 andalso RL > -0.0001)),
 
     R2 = apply_func(subbits, [<<-5.3:64/float>>, 1, 64, <<"float">>, <<"signed">>, <<"big">>]),
 
     RL2 = (5.3 + R2),
     ct:pal(";;;;~p", [R2]),
-    ?assert((RL2 >= 0 andalso RL2 < 0.0001) orelse (RL2 =< 0 andalso RL2 > -0.0001)).
+    ?assert( (RL2 >= 0 andalso RL2 < 0.0001) orelse (RL2 =< 0 andalso RL2 > -0.0001)).
 
 %%------------------------------------------------------------------------------
 %% Test cases for Hash funcs
@@ -818,57 +602,12 @@ t_hash_funcs(_) ->
     ?PROPTEST(prop_hash_fun).
 
 prop_hash_fun() ->
-    ?FORALL(
-        S,
-        binary(),
-        begin
-            (32 == byte_size(apply_func(md5, [S]))) andalso
+    ?FORALL(S, binary(),
+            begin
+                (32 == byte_size(apply_func(md5, [S]))) andalso
                 (40 == byte_size(apply_func(sha, [S]))) andalso
                 (64 == byte_size(apply_func(sha256, [S])))
-        end
-    ).
-
-%%------------------------------------------------------------------------------
-%% Test cases for zip funcs
-%%------------------------------------------------------------------------------
-
-t_zip_funcs(_) ->
-    ?PROPTEST(prop_zip_fun).
-
-prop_zip_fun() ->
-    ?FORALL(
-        S,
-        binary(),
-        S == apply_func(unzip, [apply_func(zip, [S])])
-    ).
-
-%%------------------------------------------------------------------------------
-%% Test cases for gzip funcs
-%%------------------------------------------------------------------------------
-
-t_gzip_funcs(_) ->
-    ?PROPTEST(prop_gzip_fun).
-
-prop_gzip_fun() ->
-    ?FORALL(
-        S,
-        binary(),
-        S == apply_func(gunzip, [apply_func(gzip, [S])])
-    ).
-
-%%------------------------------------------------------------------------------
-%% Test cases for zip funcs
-%%------------------------------------------------------------------------------
-
-t_zip_compress_funcs(_) ->
-    ?PROPTEST(prop_zip_compress_fun).
-
-prop_zip_compress_fun() ->
-    ?FORALL(
-        S,
-        binary(),
-        S == apply_func(zip_uncompress, [apply_func(zip_compress, [S])])
-    ).
+            end).
 
 %%------------------------------------------------------------------------------
 %% Test cases for base64
@@ -878,149 +617,52 @@ t_base64_encode(_) ->
     ?PROPTEST(prop_base64_encode).
 
 prop_base64_encode() ->
-    ?FORALL(
-        S,
-        list(range(0, 255)),
-        begin
-            Bin = iolist_to_binary(S),
-            Bin == base64:decode(apply_func(base64_encode, [Bin]))
-        end
-    ).
+    ?FORALL(S, list(range(0, 255)),
+            begin
+                Bin = iolist_to_binary(S),
+                Bin == base64:decode(apply_func(base64_encode, [Bin]))
+            end).
 
 %%--------------------------------------------------------------------
 %% Date functions
 %%--------------------------------------------------------------------
 
 t_now_rfc3339(_) ->
-    ?assert(
-        is_integer(
-            calendar:rfc3339_to_system_time(
-                binary_to_list(apply_func(now_rfc3339, []))
-            )
-        )
-    ).
+    ?assert(is_integer(
+        calendar:rfc3339_to_system_time(
+            binary_to_list(apply_func(now_rfc3339, []))))).
 
 t_now_rfc3339_1(_) ->
-    [
-        ?assert(
-            is_integer(
-                calendar:rfc3339_to_system_time(
-                    binary_to_list(apply_func(now_rfc3339, [atom_to_binary(Unit, utf8)])),
-                    [{unit, Unit}]
-                )
-            )
-        )
-     || Unit <- [second, millisecond, microsecond, nanosecond]
-    ].
+    [?assert(is_integer(
+        calendar:rfc3339_to_system_time(
+            binary_to_list(apply_func(now_rfc3339, [atom_to_binary(Unit, utf8)])),
+            [{unit, Unit}])))
+     || Unit <- [second,millisecond,microsecond,nanosecond]].
 
 t_now_timestamp(_) ->
     ?assert(is_integer(apply_func(now_timestamp, []))).
 
 t_now_timestamp_1(_) ->
-    [
-        ?assert(
-            is_integer(
-                apply_func(now_timestamp, [atom_to_binary(Unit, utf8)])
-            )
-        )
-     || Unit <- [second, millisecond, microsecond, nanosecond]
-    ].
+    [?assert(is_integer(
+            apply_func(now_timestamp, [atom_to_binary(Unit, utf8)])))
+     || Unit <- [second,millisecond,microsecond,nanosecond]].
 
 t_unix_ts_to_rfc3339(_) ->
-    [
-        begin
-            BUnit = atom_to_binary(Unit, utf8),
-            Epoch = apply_func(now_timestamp, [BUnit]),
-            DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
-            ?assertEqual(
-                Epoch,
-                calendar:rfc3339_to_system_time(binary_to_list(DateTime), [{unit, Unit}])
-            )
-        end
-     || Unit <- [second, millisecond, microsecond, nanosecond]
-    ].
+    [begin
+        BUnit = atom_to_binary(Unit, utf8),
+        Epoch = apply_func(now_timestamp, [BUnit]),
+        DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
+        ?assertEqual(Epoch,
+            calendar:rfc3339_to_system_time(binary_to_list(DateTime), [{unit, Unit}]))
+     end || Unit <- [second,millisecond,microsecond,nanosecond]].
 
 t_rfc3339_to_unix_ts(_) ->
-    [
-        begin
-            BUnit = atom_to_binary(Unit, utf8),
-            Epoch = apply_func(now_timestamp, [BUnit]),
-            DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
-            ?assertEqual(Epoch, emqx_rule_funcs:rfc3339_to_unix_ts(DateTime, BUnit))
-        end
-     || Unit <- [second, millisecond, microsecond, nanosecond]
-    ].
-
-t_format_date_funcs(_) ->
-    ?PROPTEST(prop_format_date_fun).
-
-prop_format_date_fun() ->
-    Args1 = [<<"second">>, <<"+07:00">>, <<"%m--%d--%y---%H:%M:%S%Z">>],
-    ?FORALL(
-        S,
-        range(0, 4000000000),
-        S ==
-            apply_func(
-                date_to_unix_ts,
-                Args1 ++
-                    [
-                        apply_func(
-                            format_date,
-                            Args1 ++ [S]
-                        )
-                    ]
-            )
-    ),
-    Args2 = [<<"millisecond">>, <<"+04:00">>, <<"--%m--%d--%y---%H:%M:%S%Z">>],
-    ?FORALL(
-        S,
-        range(0, 4000000000),
-        S ==
-            apply_func(
-                date_to_unix_ts,
-                Args2 ++
-                    [
-                        apply_func(
-                            format_date,
-                            Args2 ++ [S]
-                        )
-                    ]
-            )
-    ),
-    Args = [<<"second">>, <<"+08:00">>, <<"%y-%m-%d-%H:%M:%S%Z">>],
-    ?FORALL(
-        S,
-        range(0, 4000000000),
-        S ==
-            apply_func(
-                date_to_unix_ts,
-                Args ++
-                    [
-                        apply_func(
-                            format_date,
-                            Args ++ [S]
-                        )
-                    ]
-            )
-    ),
-    %% When no offset is specified, the offset should be taken from the formatted time string
-    ArgsNoOffset = [<<"second">>, <<"%y-%m-%d-%H:%M:%S%Z">>],
-    ArgsOffset = [<<"second">>, <<"+08:00">>, <<"%y-%m-%d-%H:%M:%S%Z">>],
-    ?FORALL(
-        S,
-        range(0, 4000000000),
-        S ==
-            apply_func(
-                date_to_unix_ts,
-                ArgsNoOffset ++
-                    [
-                        apply_func(
-                            format_date,
-                            ArgsOffset ++ [S]
-                        )
-                    ]
-            )
-    ).
+    [begin
+        BUnit = atom_to_binary(Unit, utf8),
+        Epoch = apply_func(now_timestamp, [BUnit]),
+        DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
+        ?assertEqual(Epoch, emqx_rule_funcs:rfc3339_to_unix_ts(DateTime, BUnit))
+     end || Unit <- [second,millisecond,microsecond,nanosecond]].
 
 %%------------------------------------------------------------------------------
 %% Utility functions
@@ -1037,10 +679,8 @@ apply_func(Name, Args, Msg) ->
     apply_func(Name, Args, emqx_message:to_map(Msg)).
 
 message() ->
-    emqx_message:set_flags(
-        #{dup => false},
-        emqx_message:make(<<"clientid">>, 1, <<"topic/#">>, <<"payload">>)
-    ).
+    emqx_message:set_flags(#{dup => false},
+        emqx_message:make(<<"clientid">>, 1, <<"topic/#">>, <<"payload">>)).
 
 % t_contains_topic(_) ->
 %     error('TODO').
@@ -1171,16 +811,15 @@ message() ->
 % t_json_decode(_) ->
 %     error('TODO').
 
+
 %%------------------------------------------------------------------------------
 %% CT functions
 %%------------------------------------------------------------------------------
 
 all() ->
-    IsTestCase = fun
-        ("t_" ++ _) -> true;
-        (_) -> false
-    end,
+    IsTestCase = fun("t_" ++ _) -> true; (_) -> false end,
     [F || {F, _A} <- module_info(exports), IsTestCase(atom_to_list(F))].
 
 suite() ->
     [{ct_hooks, [cth_surefire]}, {timetrap, {seconds, 30}}].
+

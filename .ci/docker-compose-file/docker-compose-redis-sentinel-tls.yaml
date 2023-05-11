@@ -1,44 +1,12 @@
-version: "3"
+version: '3.9'
 
 services:
-
-  redis-sentinel-tls-master:
-    container_name: redis-sentinel-tls-master
+  redis_server:
+    container_name: redis
     image: redis:${REDIS_TAG}
     volumes:
-      - ./redis/sentinel-tls:/usr/local/etc/redis
-      - ../../apps/emqx/etc/certs:/etc/certs
-    command: redis-server /usr/local/etc/redis/master.conf
+      - ../../apps/emqx_auth_redis/test/emqx_auth_redis_SUITE_data/certs:/tls
+      - ./redis/:/data/conf
+    command: bash -c "/bin/bash /data/conf/redis.sh --node sentinel --tls-enabled && tail -f /var/log/redis-server.log"
     networks:
       - emqx_bridge
-
-  redis-sentinel-tls-slave:
-    container_name: redis-sentinel-tls-slave
-    image: redis:${REDIS_TAG}
-    volumes:
-      - ./redis/sentinel-tls:/usr/local/etc/redis
-      - ../../apps/emqx/etc/certs:/etc/certs
-    command: redis-server /usr/local/etc/redis/slave.conf
-    networks:
-      - emqx_bridge
-    depends_on:
-      - redis-sentinel-tls-master
-
-  redis-sentinel-tls:
-    container_name: redis-sentinel-tls
-    image: redis:${REDIS_TAG}
-    volumes:
-      - ./redis/sentinel-tls/sentinel-base.conf:/usr/local/etc/redis/sentinel-base.conf
-      - ../../apps/emqx/etc/certs:/etc/certs
-    depends_on:
-      - redis-sentinel-tls-master
-      - redis-sentinel-tls-slave
-    command: >
-      bash -c "cp -f /usr/local/etc/redis/sentinel-base.conf /usr/local/etc/redis/sentinel.conf &&
-               redis-sentinel /usr/local/etc/redis/sentinel.conf"
-    networks:
-      - emqx_bridge
-
-
-
-

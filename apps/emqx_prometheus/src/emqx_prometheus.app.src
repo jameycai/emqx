@@ -1,17 +1,14 @@
-%% -*- mode: erlang -*-
-{application, emqx_prometheus, [
-    {description, "Prometheus for EMQX"},
-    % strict semver, bump manually!
-    {vsn, "5.0.10"},
-    {modules, []},
-    {registered, [emqx_prometheus_sup]},
-    {applications, [kernel, stdlib, prometheus, emqx, emqx_management]},
-    {mod, {emqx_prometheus_app, []}},
-    {env, []},
-    {licenses, ["Apache-2.0"]},
-    {maintainers, ["EMQX Team <contact@emqx.io>"]},
-    {links, [
-        {"Homepage", "https://emqx.io/"},
-        {"Github", "https://github.com/emqx/emqx-prometheus"}
-    ]}
-]}.
+{application, emqx_prometheus,
+ [{description, "Prometheus for EMQ X"},
+  {vsn, "4.3.0"}, % strict semver, bump manually!
+  {modules, []},
+  {registered, [emqx_prometheus_sup]},
+  {applications, [kernel,stdlib,prometheus]},
+  {mod, {emqx_prometheus_app,[]}},
+  {env, []},
+  {licenses, ["Apache-2.0"]},
+  {maintainers, ["EMQ X Team <contact@emqx.io>"]},
+  {links, [{"Homepage", "https://emqx.io/"},
+           {"Github", "https://github.com/emqx/emqx-prometheus"}
+          ]}
+ ]}.

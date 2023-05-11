@@ -19,10 +19,11 @@ rebar3.crashdump
 *~
 rebar.lock
 data/
-!test/data/
 *.conf.rendered
 *.pyc
 .DS_Store
 *.class
 Mnesia.nonode@nohost/
-src/pb/*
+src/emqx_exhook_pb.erl
+src/emqx_exhook_v_1_hook_provider_client.erl
+src/emqx_exhook_v_1_hook_provider_bhvr.erl

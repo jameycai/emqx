@@ -7,6 +7,7 @@ while IFS='' read -r line;
 do
   target_files+=("$line");
 done < <(git grep -r -l '^#!/\(bin/\|usr/bin/env bash\)' .)
+
 return_code=0
 for i in "${target_files[@]}"; do
   echo checking "$i" ...

@@ -1,12 +1,10 @@
 .eunit
-*.conf.all
 test-data/
 deps
 !deps/.placeholder
 *.o
 *.beam
 *.plt
-*.example
 erl_crash.dump
 ebin
 !ebin/.placeholder
@@ -32,6 +30,7 @@ compile_commands.json
 cuttlefish
 xrefr
 *.coverdata
+etc/emqx.conf.rendered
 Mnesia.*/
 *.DS_Store
 _checkouts
@@ -43,12 +42,11 @@ tmp/
 _packages
 elvis
 emqx_dialyzer_*_plt
-*/emqx_dashboard/priv/
+*/emqx_dashboard/priv/www
 dist.zip
 scripts/git-token
-apps/*/etc/*.all
+etc/*.seg
 _upgrade_base/
-TAGS
 erlang_ls.config
 .els_cache/
 # VSCode files
@@ -61,14 +59,4 @@ erlang_ls.config
 *#
 # For direnv
 .envrc
-# elixir
 mix.lock
-apps/emqx/test/emqx_static_checks_data/master.bpapi
-# rendered configurations
-*.conf.rendered
-*.conf.rendered.*
-lux_logs/
-/.prepare
-bom.json
-ct_run*/
-apps/emqx_conf/etc/emqx.conf.all.rendered*

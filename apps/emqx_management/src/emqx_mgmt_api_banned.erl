@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,170 +16,151 @@
 
 -module(emqx_mgmt_api_banned).
 
--include_lib("hocon/include/hoconsc.hrl").
 -include_lib("emqx/include/emqx.hrl").
--include_lib("typerefl/include/types.hrl").
 
 -include("emqx_mgmt.hrl").
 
--behaviour(minirest_api).
+-rest_api(#{name   => list_banned,
+            method => 'GET',
+            path   => "/banned/",
+            func   => list,
+            descr  => "List banned"}).
 
--export([
-    api_spec/0,
-    paths/0,
-    schema/1,
-    fields/1
-]).
+-rest_api(#{name   => create_banned,
+            method => 'POST',
+            path   => "/banned/",
+            func   => create,
+            descr  => "Create banned"}).
 
--export([format/1]).
+-rest_api(#{name   => delete_banned,
+            method => 'DELETE',
+            path   => "/banned/:as/:who",
+            func   => delete,
+            descr  => "Delete banned"}).
 
--export([
-    banned/2,
-    delete_banned/2
-]).
+-export([ list/2
+        , create/2
+        , delete/2
+        ]).
 
--define(TAB, emqx_banned).
--define(TAGS, [<<"Banned">>]).
+list(_Bindings, Params) ->
+    minirest:return({ok, emqx_mgmt_api:paginate(emqx_banned, Params, fun format/1)}).
 
--define(BANNED_TYPES, [clientid, username, peerhost]).
-
--define(FORMAT_FUN, {?MODULE, format}).
-
-api_spec() ->
-    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true, translate_body => true}).
-
-paths() ->
-    ["/banned", "/banned/:as/:who"].
-
-schema("/banned") ->
-    #{
-        'operationId' => banned,
-        get => #{
-            description => ?DESC(list_banned_api),
-            tags => ?TAGS,
-            parameters => [
-                hoconsc:ref(emqx_dashboard_swagger, page),
-                hoconsc:ref(emqx_dashboard_swagger, limit)
-            ],
-            responses => #{
-                200 => [
-                    {data, hoconsc:mk(hoconsc:array(hoconsc:ref(ban)), #{})},
-                    {meta, hoconsc:mk(hoconsc:ref(emqx_dashboard_swagger, meta), #{})}
-                ]
-            }
-        },
-        post => #{
-            description => ?DESC(create_banned_api),
-            tags => ?TAGS,
-            'requestBody' => hoconsc:mk(hoconsc:ref(ban)),
-            responses => #{
-                200 => [{data, hoconsc:mk(hoconsc:array(hoconsc:ref(ban)), #{})}],
-                400 => emqx_dashboard_swagger:error_codes(
-                    ['ALREADY_EXISTS', 'BAD_REQUEST'],
-                    ?DESC(create_banned_api_response400)
-                )
-            }
-        }
-    };
-schema("/banned/:as/:who") ->
-    #{
-        'operationId' => delete_banned,
-        delete => #{
-            description => ?DESC(delete_banned_api),
-            tags => ?TAGS,
-            parameters => [
-                {as,
-                    hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
-                        desc => ?DESC(as),
-                        required => true,
-                        in => path,
-                        example => username
-                    })},
-                {who,
-                    hoconsc:mk(binary(), #{
-                        desc => ?DESC(who),
-                        required => true,
-                        in => path,
-                        example => <<"Badass">>
-                    })}
-            ],
-            responses => #{
-                204 => <<"Delete banned success">>,
-                404 => emqx_dashboard_swagger:error_codes(
-                    ['NOT_FOUND'],
-                    ?DESC(delete_banned_api_response404)
-                )
-            }
-        }
-    }.
-
-fields(ban) ->
-    [
-        {as,
-            hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
-                desc => ?DESC(as),
-                required => true,
-                example => username
-            })},
-        {who,
-            hoconsc:mk(binary(), #{
-                desc => ?DESC(who),
-                required => true,
-                example => <<"Banned name"/utf8>>
-            })},
-        {by,
-            hoconsc:mk(binary(), #{
-                desc => ?DESC(by),
-                required => false,
-                example => <<"mgmt_api">>
-            })},
-        {reason,
-            hoconsc:mk(binary(), #{
-                desc => ?DESC(reason),
-                required => false,
-                example => <<"Too many requests">>
-            })},
-        {at,
-            hoconsc:mk(emqx_datetime:epoch_second(), #{
-                desc => ?DESC(at),
-                required => false,
-                example => <<"2021-10-25T21:48:47+08:00">>
-            })},
-        {until,
-            hoconsc:mk(emqx_datetime:epoch_second(), #{
-                desc => ?DESC(until),
-                required => false,
-                example => <<"2021-10-25T21:53:47+08:00">>
-            })}
-    ].
-
-banned(get, #{query_string := Params}) ->
-    Response = emqx_mgmt_api:paginate(?TAB, Params, ?FORMAT_FUN),
-    {200, Response};
-banned(post, #{body := Body}) ->
-    case emqx_banned:parse(Body) of
-        {error, Reason} ->
-            {400, 'BAD_REQUEST', list_to_binary(Reason)};
-        Ban ->
-            case emqx_banned:create(Ban) of
-                {ok, Banned} ->
-                    {200, format(Banned)};
-                {error, {already_exist, Old}} ->
-                    OldBannedFormat = emqx_utils_json:encode(format(Old)),
-                    {400, 'ALREADY_EXISTS', OldBannedFormat}
-            end
+create(_Bindings, Params) ->
+    case pipeline([fun ensure_required/1,
+                   fun validate_params/1], Params) of
+        {ok, NParams} ->
+            {ok, Banned} = pack_banned(NParams),
+            ok = emqx_mgmt:create_banned(Banned),
+            minirest:return({ok, maps:from_list(Params)});
+        {error, Code, Message} ->
+            minirest:return({error, Code, Message})
     end.
 
-delete_banned(delete, #{bindings := Params}) ->
-    case emqx_banned:look_up(Params) of
-        [] ->
-            #{as := As0, who := Who0} = Params,
-            Message = list_to_binary(io_lib:format("~p: ~s not found", [As0, Who0])),
-            {404, 'NOT_FOUND', Message};
-        _ ->
-            ok = emqx_banned:delete(Params),
-            {204}
+delete(#{as := As, who := Who}, _) ->
+    Params = [{<<"who">>, bin(emqx_mgmt_util:urldecode(Who))},
+              {<<"as">>, bin(emqx_mgmt_util:urldecode(As))}],
+    case pipeline([fun ensure_required/1,
+                   fun validate_params/1], Params) of
+        {ok, NParams} ->
+            do_delete(proplists:get_value(<<"as">>, NParams), proplists:get_value(<<"who">>, NParams)),
+            minirest:return();
+        {error, Code, Message} ->
+            minirest:return({error, Code, Message})
     end.
 
-format(Banned) ->
-    emqx_banned:format(Banned).
+pipeline([], Params) ->
+    {ok, Params};
+pipeline([Fun|More], Params) ->
+    case Fun(Params) of
+        {ok, NParams} ->
+            pipeline(More, NParams);
+        {error, Code, Message} ->
+            {error, Code, Message}
+    end.
+
+%% Plugs
+ensure_required(Params) when is_list(Params) ->
+    #{required_params := RequiredParams, message := Msg} = required_params(),
+    AllIncluded = lists:all(fun(Key) ->
+                      lists:keymember(Key, 1, Params)
+                  end, RequiredParams),
+    case AllIncluded of
+        true -> {ok, Params};
+        false ->
+            {error, ?ERROR7, Msg}
+    end.
+
+validate_params(Params) ->
+    #{enum_values := AsEnums, message := Msg} = enum_values(as),
+    case lists:member(proplists:get_value(<<"as">>, Params), AsEnums) of
+        true -> {ok, Params};
+        false ->
+            {error, ?ERROR8, Msg}
+    end.
+
+pack_banned(Params) ->
+    Now = erlang:system_time(second),
+    do_pack_banned(Params, #{by => <<"user">>, at => Now, until => Now + 300}).
+
+do_pack_banned([], #{who := Who,  by := By, reason := Reason, at := At, until := Until}) ->
+    {ok, #banned{who = Who, by = By, reason = Reason, at = At, until = Until}};
+do_pack_banned([{<<"who">>, Who} | Params], Banned) ->
+    case lists:keytake(<<"as">>, 1, Params) of
+        {value, {<<"as">>, <<"peerhost">>}, Params2} ->
+            {ok, IPAddress} = inet:parse_address(str(Who)),
+            do_pack_banned(Params2, Banned#{who => {peerhost, IPAddress}});
+        {value, {<<"as">>, <<"clientid">>}, Params2} ->
+            do_pack_banned(Params2, Banned#{who => {clientid, Who}});
+        {value, {<<"as">>, <<"username">>}, Params2} ->
+            do_pack_banned(Params2, Banned#{who => {username, Who}})
+    end;
+do_pack_banned([P1 = {<<"as">>, _}, P2 | Params], Banned) ->
+    do_pack_banned([P2, P1 | Params], Banned);
+do_pack_banned([{<<"by">>, By} | Params], Banned) ->
+    do_pack_banned(Params, Banned#{by => By});
+do_pack_banned([{<<"reason">>, Reason} | Params], Banned) ->
+    do_pack_banned(Params, Banned#{reason => Reason});
+do_pack_banned([{<<"at">>, At} | Params], Banned) ->
+    do_pack_banned(Params, Banned#{at => At});
+do_pack_banned([{<<"until">>, Until} | Params], Banned) ->
+    do_pack_banned(Params, Banned#{until => Until});
+do_pack_banned([_P | Params], Banned) -> %% ignore other params
+    do_pack_banned(Params, Banned).
+
+do_delete(<<"peerhost">>, Who) ->
+    {ok, IPAddress} = inet:parse_address(str(Who)),
+    emqx_mgmt:delete_banned({peerhost, IPAddress});
+do_delete(<<"username">>, Who) ->
+    emqx_mgmt:delete_banned({username, bin(Who)});
+do_delete(<<"clientid">>, Who) ->
+    emqx_mgmt:delete_banned({clientid, bin(Who)}).
+
+required_params() ->
+    #{required_params => [<<"who">>, <<"as">>],
+      message => <<"missing mandatory params: ['who', 'as']">> }.
+
+enum_values(as) ->
+    #{enum_values => [<<"clientid">>, <<"username">>, <<"peerhost">>],
+      message => <<"value of 'as' must be one of: ['clientid', 'username', 'peerhost']">> }.
+
+%% Internal Functions
+
+format(BannedList) when is_list(BannedList) ->
+    [format(Ban) || Ban <- BannedList];
+format(#banned{who = {As, Who}, by = By, reason = Reason, at = At, until = Until}) ->
+    #{who => case As of
+                 peerhost -> bin(inet:ntoa(Who));
+                 _ -> Who
+             end,
+      as => As, by => By, reason => Reason, at => At, until => Until}.
+
+bin(L) when is_list(L) ->
+    list_to_binary(L);
+bin(B) when is_binary(B) ->
+    B.
+
+str(B) when is_binary(B) ->
+    binary_to_list(B);
+str(L) when is_list(L) ->
+    L.

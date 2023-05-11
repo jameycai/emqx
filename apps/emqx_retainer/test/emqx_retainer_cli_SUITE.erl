@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,66 +19,36 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 
--include("emqx_retainer.hrl").
-
 -include_lib("eunit/include/eunit.hrl").
--include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
-all() -> emqx_common_test_helpers:all(?MODULE).
+all() -> emqx_ct:all(?MODULE).
 
 init_per_suite(Config) ->
-    emqx_retainer_SUITE:load_conf(),
-    %% Start Apps
-    emqx_common_test_helpers:start_apps([emqx_retainer]),
+    emqx_ct_helpers:start_apps([emqx_retainer]),
     Config.
 
 end_per_suite(_Config) ->
-    emqx_common_test_helpers:stop_apps([emqx_retainer]).
+    emqx_ct_helpers:stop_apps([emqx_retainer]).
 
-t_reindex_status(_Config) ->
-    ok = emqx_retainer_mnesia_cli:retainer(["reindex", "status"]).
+init_per_testcase(TestCase, Config) ->
+    Config.
 
-t_info(_Config) ->
-    ok = emqx_retainer_mnesia_cli:retainer(["info"]).
+end_per_testcase(_TestCase, Config) ->
+    emqx_retainer:clean(<<"#">>).
 
-t_topics(_Config) ->
-    ok = emqx_retainer_mnesia_cli:retainer(["topics"]).
+t_cmd(_) ->
+    {ok, C1} = emqtt:start_link([{clean_start, true}, {proto_ver, v5}]),
+    {ok, _} = emqtt:connect(C1),
+    emqtt:publish(C1, <<"/retained">>, <<"this is a retained message">>, [{qos, 0}, {retain, true}]),
+    emqtt:publish(C1, <<"/retained/2">>, <<"this is a retained message">>, [{qos, 0}, {retain, true}]),
+    timer:sleep(1000),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["topics"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["info"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["clean", "retained"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["clean"])).
 
-t_clean(_Config) ->
-    ok = emqx_retainer_mnesia_cli:retainer(["clean"]).
+% t_unload(_) ->
+%     error('TODO').
 
-t_topic(_Config) ->
-    ok = emqx_retainer_mnesia_cli:retainer(["clean", "foo/bar"]).
-
-t_reindex(_Config) ->
-    {ok, C} = emqtt:start_link([{clean_start, true}, {proto_ver, v5}]),
-    {ok, _} = emqtt:connect(C),
-
-    ok = emqx_retainer:clean(),
-
-    ?check_trace(
-        ?wait_async_action(
-            lists:foreach(
-                fun(N) ->
-                    emqtt:publish(
-                        C,
-                        erlang:iolist_to_binary([
-                            <<"retained/">>,
-                            io_lib:format("~5..0w", [N])
-                        ]),
-                        <<"this is a retained message">>,
-                        [{qos, 0}, {retain, true}]
-                    )
-                end,
-                lists:seq(1, 1000)
-            ),
-            #{?snk_kind := message_retained, topic := <<"retained/01000">>},
-            1000
-        ),
-        []
-    ),
-
-    emqx_config:put([retainer, backend, index_specs], [[4, 5]]),
-    ok = emqx_retainer_mnesia_cli:retainer(["reindex", "start"]),
-
-    ?assertEqual(1000, mnesia:table_info(?TAB_INDEX, size)).
+% t_load(_) ->
+%     error('TODO').

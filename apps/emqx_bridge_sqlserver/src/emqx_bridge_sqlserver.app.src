@@ -1,9 +1,0 @@
-{application, emqx_bridge_sqlserver, [
-    {description, "EMQX Enterprise SQL Server Bridge"},
-    {vsn, "0.1.0"},
-    {registered, []},
-    {applications, [kernel, stdlib, odbc]},
-    {env, []},
-    {modules, []},
-    {links, []}
-]}.

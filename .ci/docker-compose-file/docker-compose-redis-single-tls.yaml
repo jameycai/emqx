@@ -1,25 +1,19 @@
 version: '3.9'
 
 services:
-  redis_server_tls:
-    container_name: redis-tls
+  redis_server:
+    container_name: redis
     image: redis:${REDIS_TAG}
     volumes:
-      - ./certs/server.crt:/etc/certs/redis.crt
-      - ./certs/server.key:/etc/certs/redis.key
-      - ./certs/ca.crt:/etc/certs/ca.crt
-    ports:
-      - "6380:6380"
+      - ../../apps/emqx_auth_redis/test/emqx_auth_redis_SUITE_data/certs:/tls
     command:
       - redis-server
       - "--bind 0.0.0.0 ::"
       - --requirepass public
       - --tls-port 6380
-      - --tls-cert-file /etc/certs/redis.crt
-      - --tls-key-file /etc/certs/redis.key
-      - --tls-ca-cert-file /etc/certs/ca.crt
-      - --tls-protocols "TLSv1.3"
-      - --tls-ciphersuites "TLS_CHACHA20_POLY1305_SHA256"
+      - --tls-cert-file /tls/redis.crt
+      - --tls-key-file /tls/redis.key
+      - --tls-ca-cert-file /tls/ca.crt
     restart: always
     networks:
-      emqx_bridge:
+      - emqx_bridge

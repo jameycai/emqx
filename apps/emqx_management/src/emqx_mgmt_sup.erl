@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,24 +23,8 @@
 -export([init/1]).
 
 start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    Workers =
-        case os:type() of
-            {unix, linux} ->
-                [child_spec(emqx_mgmt_cache, 5000, worker)];
-            _ ->
-                []
-        end,
-    {ok, {{one_for_one, 1, 5}, Workers}}.
+	{ok, {{one_for_one, 1, 5}, []}}.
 
-child_spec(Mod, Shutdown, Type) ->
-    #{
-        id => Mod,
-        start => {Mod, start_link, []},
-        restart => permanent,
-        shutdown => Shutdown,
-        type => Type,
-        modules => [Mod]
-    }.

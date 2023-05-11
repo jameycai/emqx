@@ -20,36 +20,18 @@ main(Args) ->
             end
     end,
     ok = add_libs_dir(),
-    case Args of
-        ["hocon" | Rest] ->
-            %% forward the call to hocon_cli
-            hocon_cli:main(Rest);
-        ["check_license_key", Key0] ->
-            Key = cleanup_key(Key0),
-            check_license(#{key => Key});
-        _ ->
-            do(Args)
-    end.
-
-%% the key is a string (list) representation of a binary, so we need
-%% to remove the leading and trailing angle brackets.
-cleanup_key(Str0) ->
-    Str1 = iolist_to_binary(string:replace(Str0, "<<", "", leading)),
-    iolist_to_binary(string:replace(Str1, ">>", "", trailing)).
-
-do(Args) ->
     ok = do_with_halt(Args, "mnesia_dir", fun create_mnesia_dir/2),
     ok = do_with_halt(Args, "chkconfig", fun("-config", X) -> chkconfig(X) end),
     ok = do_with_halt(Args, "chkconfig", fun chkconfig/1),
     Args1 = do_with_ret(Args, "-name",
                         fun(TargetName) ->
-                                ThisNode = this_node_name(longnames, TargetName),
+                                ThisNode = this_node_name(TargetName),
                                 {ok, _} = net_kernel:start([ThisNode, longnames]),
                                 put(target_node, nodename(TargetName))
                         end),
     Args2 = do_with_ret(Args1, "-sname",
                         fun(TargetName) ->
-                                ThisNode = this_node_name(shortnames, TargetName),
+                                ThisNode = this_node_name(TargetName),
                                 {ok, _} = net_kernel:start([ThisNode, shortnames]),
                                 put(target_node, nodename(TargetName))
                         end),
@@ -73,27 +55,17 @@ do(Args) ->
             halt(1)
     end,
 
-    %% Mute logger from now on.
-    %% Otherwise Erlang distribution over TLS (inet_tls_dist) warning logs
-    %% and supervisor reports may contaminate io:format outputs
-    logger:set_primary_config(level, none),
     case RestArgs of
         ["getpid"] ->
             io:format("~p\n", [list_to_integer(rpc:call(TargetNode, os, getpid, []))]);
         ["ping"] ->
-            %% If we got this far, the node already responded to a ping, so just dump
+            %% If we got this far, the node already responsed to a ping, so just dump
             %% a "pong"
             io:format("pong\n");
         ["stop"] ->
-            case rpc:call(TargetNode, emqx_machine, graceful_shutdown, [], 60000) of
-                ok ->
-                    ok;
-                {badrpc, nodedown} ->
-                    %% nodetool commands are always executed after a ping
-                    %% which if the code gets here, it's because the target node
-                    %% has shutdown before RPC returns.
-                    ok
-            end;
+            io:format("~p\n", [rpc:call(TargetNode, init, stop, [], 60000)]);
+        ["restart", "-config", ConfigFile | _RestArgs1] ->
+            io:format("~p\n", [rpc:call(TargetNode, emqx, restart, [ConfigFile], 60000)]);
         ["rpc", Module, Function | RpcArgs] ->
             case rpc:call(TargetNode, list_to_atom(Module), list_to_atom(Function),
                           [RpcArgs], 60000) of
@@ -130,42 +102,39 @@ do(Args) ->
                     io:format("~p\n", [Other])
             end;
         ["eval" | ListOfArgs] ->
-            Parsed = parse_eval_args(ListOfArgs),
+            % shells may process args into more than one, and end up stripping
+            % spaces, so this converts all of that to a single string to parse
+            String = binary_to_list(
+                      list_to_binary(
+                        join(ListOfArgs," ")
+                      )
+                    ),
+
+            % then just as a convenience to users, if they forgot a trailing
+            % '.' add it for them.
+            Normalized =
+              case lists:reverse(String) of
+                [$. | _] -> String;
+                R -> lists:reverse([$. | R])
+              end,
+
+            % then scan and parse the string
+            {ok, Scanned, _} = erl_scan:string(Normalized),
+            {ok, Parsed } = erl_parse:parse_exprs(Scanned),
+
             % and evaluate it on the remote node
             case rpc:call(TargetNode, erl_eval, exprs, [Parsed, [] ]) of
                 {value, Value, _} ->
-                    io:format ("~p~n",[Value]);
+                    io:format ("~p\n",[Value]);
                 {badrpc, Reason} ->
-                    io:format("RPC to ~p failed: ~p~n", [TargetNode, Reason]),
+                    io:format("RPC to ~p failed: ~p\n", [TargetNode, Reason]),
                     halt(1)
             end;
         Other ->
-            io:format("Other: ~p~n", [Other]),
-            io:format("Usage: nodetool chkconfig|getpid|ping|stop|rpc|rpc_infinity|rpcterms|eval|cold_eval [Terms] [RPC]\n")
+            io:format("Other: ~p\n", [Other]),
+            io:format("Usage: nodetool {genconfig, chkconfig|getpid|ping|stop|restart|reboot|rpc|rpc_infinity|rpcterms|eval [Terms]} [RPC]\n")
     end,
     net_kernel:stop().
-
-parse_eval_args(Args) ->
-    % shells may process args into more than one, and end up stripping
-    % spaces, so this converts all of that to a single string to parse
-    String = binary_to_list(
-                list_to_binary(
-                join(Args," ")
-                )
-            ),
-
-    % then just as a convenience to users, if they forgot a trailing
-    % '.' add it for them.
-    Normalized =
-        case lists:reverse(String) of
-        [$. | _] -> String;
-        R -> lists:reverse([$. | R])
-        end,
-
-    % then scan and parse the string
-    {ok, Scanned, _} = erl_scan:string(Normalized),
-    {ok, Parsed } = erl_parse:parse_exprs(Scanned),
-    Parsed.
 
 do_with_ret(Args, Name, Handler) ->
     {arity, Arity} = erlang:fun_info(Handler, arity),
@@ -231,16 +200,9 @@ nodename(Name) ->
             list_to_atom(lists:concat([Node, "@", Host]))
     end.
 
-this_node_name(longnames, Name) ->
+this_node_name(Name) ->
     [Node, Host] = re:split(Name, "@", [{return, list}, unicode]),
-    list_to_atom(lists:concat(["remsh_maint_", Node, node_name_suffix_id(), "@", Host]));
-this_node_name(shortnames, Name) ->
-    list_to_atom(lists:concat(["remsh_maint_", Name, node_name_suffix_id()])).
-
-%% use the reversed value that from pid mod 1000 as the node name suffix
-node_name_suffix_id() ->
-    Pid = os:getpid(),
-    string:slice(string:reverse(Pid), 0, 3).
+    list_to_atom(lists:concat(["remsh_maint_", Node, os:getpid(), "@", Host])).
 
 %% For windows???
 create_mnesia_dir(DataDir, NodeName) ->
@@ -268,21 +230,6 @@ chkconfig(File) ->
             halt(1);
         {error, Error} ->
             io:format(standard_error, ["Error reading config file: ", File, " ", file:format_error(Error), "\n"], []),
-            halt(1)
-    end.
-
-check_license(Config) ->
-    ok = ensure_application_load(emqx_license),
-    %% This checks formal license validity to ensure
-    %% that the node can successfully start with the given license.
-
-    %% However, a valid license may be expired. In this case, the node will
-    %% start but will not be able to receive connections due to connection limits.
-    %% It may receive license updates from the cluster further.
-    case emqx_license:read_license(Config) of
-        {ok, _} -> ok;
-        {error, Error} ->
-            io:format(standard_error, "Error reading license: ~p~n", [Error]),
             halt(1)
     end.
 
@@ -361,28 +308,7 @@ add_libs_dir() ->
 
 add_lib_dir(RootDir, Name, Vsn) ->
     LibDir = filename:join([RootDir, lib, atom_to_list(Name) ++ "-" ++ Vsn, ebin]),
-    case code:add_patha(LibDir) of
-        true ->
-            %% load all applications into application controller, before performing
-            %% the configuration check of HOCON
-            %%
-            %% It helps to implement the feature of dynamically searching schema.
-            %% See `emqx_gateway_schema:fields(gateway)`
-            is_emqx_application(Name) andalso ensure_application_load(Name),
-            ok;
+    case code:add_pathz(LibDir) of
+        true -> ok;
         {error, _} -> error(LibDir)
-    end.
-
-is_emqx_application(Name) when is_atom(Name) ->
-    is_emqx_application(atom_to_list(Name));
-is_emqx_application("emqx_" ++ _Rest) ->
-    true;
-is_emqx_application(_) ->
-    false.
-
-ensure_application_load(Name) ->
-    case application:load(Name) of
-        ok -> ok;
-        {error, {already_loaded, _}} -> ok;
-        {error, Reason} -> error({failed_to_load_application, Name, Reason})
     end.

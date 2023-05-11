@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,24 +16,23 @@
 
 -module(emqx_rule_engine_app).
 
--include("rule_engine.hrl").
-
 -behaviour(application).
+
+-emqx_plugin(?MODULE).
 
 -export([start/2]).
 
 -export([stop/1]).
 
 start(_Type, _Args) ->
-    _ = ets:new(?RULE_TAB, [named_table, public, ordered_set, {read_concurrency, true}]),
-    ok = emqx_rule_events:reload(),
-    SupRet = emqx_rule_engine_sup:start_link(),
-    ok = emqx_rule_engine:load_rules(),
-    emqx_conf:add_handler(emqx_rule_engine:config_key_path(), emqx_rule_engine),
-    emqx_rule_engine_cli:load(),
-    SupRet.
+    {ok, Sup} = emqx_rule_engine_sup:start_link(),
+    _ = emqx_rule_engine_sup:start_locker(),
+    ok = emqx_rule_engine:load_providers(),
+    ok = emqx_rule_engine:refresh_resources(),
+    ok = emqx_rule_engine:refresh_rules(),
+    ok = emqx_rule_engine_cli:load(),
+    {ok, Sup}.
 
 stop(_State) ->
-    emqx_rule_engine_cli:unload(),
-    emqx_conf:remove_handler(emqx_rule_engine:config_key_path()),
-    ok = emqx_rule_events:unload().
+    ok = emqx_rule_events:unload(),
+    ok = emqx_rule_engine_cli:unload().

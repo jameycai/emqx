@@ -1,9 +1,0 @@
-{application, emqx_bridge_clickhouse, [
-    {description, "EMQX Enterprise ClickHouse Bridge"},
-    {vsn, "0.1.0"},
-    {registered, []},
-    {applications, [kernel, stdlib]},
-    {env, []},
-    {modules, []},
-    {links, []}
-]}.

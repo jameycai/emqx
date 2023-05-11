@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -14,30 +14,7 @@
 %% limitations under the License.
 %%--------------------------------------------------------------------
 
--include_lib("emqx/include/emqx.hrl").
-
 -define(APP, emqx_retainer).
--define(TAB_MESSAGE, emqx_retainer_message).
--define(TAB_INDEX, emqx_retainer_index).
--define(TAB_INDEX_META, emqx_retainer_index_meta).
--define(RETAINER_SHARD, emqx_retainer_shard).
+-define(TAB, ?APP).
+-record(retained, {topic, msg, expiry_time}).
 
--type topic() :: binary().
--type payload() :: binary().
--type message() :: #message{}.
-
--type context() :: #{
-    context_id := pos_integer(),
-    atom() => term()
-}.
-
--define(DELIVER_SEMAPHORE, deliver_remained_quota).
--type semaphore() :: ?DELIVER_SEMAPHORE.
--type cursor() :: undefined | term().
--type result() :: term().
-
--define(SHARED_CONTEXT_TAB, emqx_retainer_ctx).
--record(shared_context, {key :: atom(), value :: term()}).
--type shared_context_key() :: ?DELIVER_SEMAPHORE.
-
--type backend() :: emqx_retainer_storage_mnesia.

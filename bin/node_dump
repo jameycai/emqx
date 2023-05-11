@@ -1,19 +1,17 @@
 #!/bin/sh
 set -eu
 
-# shellcheck disable=SC1090,SC1091
-RUNNER_ROOT_DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")"/..; pwd -P)"
-echo "Running node dump in ${RUNNER_ROOT_DIR}"
+ROOT_DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")"/..; pwd -P)"
+echo "Running node dump in ${ROOT_DIR}"
 
-# shellcheck disable=SC1090,SC1091
-. "$RUNNER_ROOT_DIR"/releases/emqx_vars
+# shellcheck disable=SC1090
+. "$ROOT_DIR"/releases/emqx_vars
 
-cd "${RUNNER_ROOT_DIR}"
+cd "${ROOT_DIR}"
 
-DUMP="$EMQX_LOG_DIR/node_dump_$(date +"%Y%m%d_%H%M%S").tar.gz"
-CONF_DUMP="$EMQX_LOG_DIR/conf.dump"
-LICENSE_INFO="$EMQX_LOG_DIR/license_info.txt"
-SYSINFO="$EMQX_LOG_DIR/sysinfo.txt"
+DUMP="$RUNNER_LOG_DIR/node_dump_$(date +"%Y%m%d_%H%M%S").tar.gz"
+CONF_DUMP="$RUNNER_LOG_DIR/conf.dump"
+SYSINFO="$RUNNER_LOG_DIR/sysinfo.txt"
 
 LOG_MAX_AGE_DAYS=3
 
@@ -57,6 +55,7 @@ done
     collect netstat -tnl
 
     collect "$RUNNER_BIN_DIR"/emqx_ctl plugins list
+    collect "$RUNNER_BIN_DIR"/emqx_ctl modules list
 
     collect "$RUNNER_BIN_DIR"/emqx_ctl vm all
     collect "$RUNNER_BIN_DIR"/emqx_ctl listeners
@@ -67,21 +66,15 @@ done
     collect "$RUNNER_BIN_DIR"/emqx eval "'emqx_node_dump:app_env_dump()'"
 } > "${CONF_DUMP}"
 
-# Collect license info:
-{
-    collect "$RUNNER_BIN_DIR"/emqx_ctl license info
-} > "${LICENSE_INFO}"
-
 # Pack files
 {
-    find "$EMQX_LOG_DIR" -mtime -"${LOG_MAX_AGE_DAYS}" \( -name '*.log.*' -or -name 'run_erl.log*' \)
+    find "$RUNNER_LOG_DIR" -mtime -"${LOG_MAX_AGE_DAYS}" \( -name '*.log.*' -or -name 'run_erl.log*' \)
     echo "${SYSINFO}"
     echo "${CONF_DUMP}"
-    echo "${LICENSE_INFO}"
 } | tar czf "${DUMP}" -T -
 
 ## Cleanup:
-rm "${SYSINFO}" "${LICENSE_INFO}"
+rm "${SYSINFO}"
 #rm "${CONF_DUMP}" # Keep it for inspection
 
 echo "Created a node dump ${DUMP}"

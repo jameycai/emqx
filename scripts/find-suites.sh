@@ -8,9 +8,9 @@ set -euo pipefail
 # ensure dir
 cd -P -- "$(dirname -- "$0")/.."
 
-if [ -z "${EMQX_CT_SUITES:-}" ]; then
+TESTDIR="test"
+if [ "$1" != "emqx" ]; then
     TESTDIR="$1/test"
-    find "${TESTDIR}" -name "*_SUITE.erl" -print0 2>/dev/null | xargs -0 | tr ' ' ','
-else
-    echo "${EMQX_CT_SUITES}"
 fi
+# shellcheck disable=SC2038
+find "${TESTDIR}" -name "*_SUITE.erl" 2>/dev/null | xargs | tr ' ' ','
